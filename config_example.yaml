@@ -1,0 +1,86 @@
+# seis2cube pipeline configuration
+# Copy this file, adjust paths and parameters, then run:
+#   seis2cube run --config config.yaml
+
+# ── Input / Output ──────────────────────────────────────────────────────
+cube3d_path: data/cube_3d.segy
+lines2d_paths:
+  - data/line2d_001.segy
+  - data/line2d_002.segy
+  - data/line2d_003.segy
+expand_polygon_path: data/expansion_polygon.geojson
+out_cube_path: output/extended_cube.segy
+qc_report_dir: output/qc_report
+
+# ── SEG-Y header byte positions ─────────────────────────────────────────
+# Defaults follow SEG-Y Rev 1 (inline=189, xline=193).
+# Override if your files use non-standard positions.
+header_bytes:
+  inline: 189
+  xline: 193
+  coord_source: cdp          # source | group | cdp
+  coord_scalar_byte: 71
+  coord_units_byte: 89
+
+# ── I/O options ──────────────────────────────────────────────────────────
+io:
+  mmap: true                  # Use segyio memory-mapping
+  ignore_geometry: false      # true → skip iline/xline geometry (faster, unstructured)
+  strict: true                # segyio strict mode for structured files
+  # chunking:                 # Uncomment for out-of-core processing
+  #   inline_chunk: 64
+  #   xline_chunk: 64
+  #   time_chunk: 256
+  #   format: zarr
+
+# ── CRS ──────────────────────────────────────────────────────────────────
+crs:
+  source_crs: null            # null → assume already projected; or "EPSG:4326"
+  target_crs: "EPSG:32637"   # Projected CRS (e.g. UTM zone 37N)
+
+# ── Calibration (2D↔3D matching) ────────────────────────────────────────
+calibration:
+  method: global_shift        # global_shift | windowed | linear_regression | gbdt
+  window_ms: 400.0
+  window_overlap_ms: 100.0
+  holdout_fraction: 0.2
+  holdout_mode: segment       # segment | line
+  spectral_matching: false
+  # Regression / GBDT specific:
+  features: [amplitude, envelope, rms, d_dt]
+  n_estimators: 200
+  max_depth: 6
+  learning_rate: 0.1
+
+# ── Interpolation ───────────────────────────────────────────────────────
+interpolation:
+  method: pocs                # idw | pocs | mssa
+  # IDW
+  idw_power: 2.0
+  idw_max_neighbours: 12
+  # POCS
+  pocs_niter: 100
+  pocs_transform: fft         # fft | wavelet | curvelet
+  pocs_fast: true
+  pocs_threshold_schedule: exponential  # exponential | linear
+  # MSSA
+  mssa_rank: 20
+  mssa_window: 50
+  # Hyperparameter tuning trials inside 3D simulation
+  sim_n_trials: 10
+
+# ── Compute ──────────────────────────────────────────────────────────────
+compute:
+  backend: numpy              # numpy | dask
+  n_workers: 4
+  memory_limit: "4GB"
+  temp_dir: null
+
+# ── Seam blending ────────────────────────────────────────────────────────
+blend:
+  enabled: true
+  taper_width_traces: 10
+
+# ── Grid extension (optional overrides) ─────────────────────────────────
+grid_inline_step: null        # null → auto-detect from 3D
+grid_xline_step: null
