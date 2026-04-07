@@ -112,6 +112,10 @@ class GBDTCalibrator(CalibrationStrategy):
     def _apply_array(self, amp_2d: np.ndarray, model: CalibrationModel) -> np.ndarray:
         import pickle, base64
         p = model.params
+        was_1d = amp_2d.ndim == 1
+        if was_1d:
+            amp_2d = amp_2d[np.newaxis, :]
+
         scaler_mean = np.array(p["scaler_mean"])
         scaler_scale = np.array(p["scaler_scale"])
         gbdt = pickle.loads(base64.b64decode(p["model_pickle_b64"]))
@@ -132,4 +136,5 @@ class GBDTCalibrator(CalibrationStrategy):
             sample_indices = np.linspace(0, n_samp - 1, n_win)
             out[i] = np.interp(np.arange(n_samp), sample_indices, pred)
 
-        return out.astype(np.float32)
+        result = out.astype(np.float32)
+        return result[0] if was_1d else result

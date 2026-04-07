@@ -84,5 +84,37 @@ def validate(config: Path) -> None:
     click.echo(f"  Interpolation: {cfg.interpolation.method.value}")
 
 
+@main.command()
+@click.option(
+    "--config", "-c",
+    required=False,
+    type=click.Path(exists=True, path_type=Path),
+    help="Optional: pre-load a config YAML.",
+)
+@click.option("--port", "-p", default=8501, type=int, help="Streamlit server port.")
+def ui(config: Path | None, port: int) -> None:
+    """Launch the Streamlit dashboard."""
+    import subprocess
+    import sys
+
+    app_path = Path(__file__).parent / "ui" / "app.py"
+    cmd = [
+        sys.executable, "-m", "streamlit", "run",
+        str(app_path),
+        "--server.port", str(port),
+        "--server.headless", "true",
+        "--theme.base", "dark",
+        "--theme.primaryColor", "#6366F1",
+        "--theme.backgroundColor", "#11111B",
+        "--theme.secondaryBackgroundColor", "#1E1E2E",
+        "--theme.textColor", "#CDD6F4",
+    ]
+    if config:
+        cmd += ["--", f"--config={config}"]
+
+    click.echo(f"Starting seis2cube UI on http://localhost:{port}")
+    subprocess.run(cmd)
+
+
 if __name__ == "__main__":
     main()

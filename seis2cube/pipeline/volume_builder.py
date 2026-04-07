@@ -57,8 +57,19 @@ class VolumeBuilder:
         self._expand_poly = expand_polygon
 
         # Grid steps
-        self._dil = grid_il_step or float(self._orig_il[1] - self._orig_il[0]) if len(self._orig_il) > 1 else 1.0
-        self._dxl = grid_xl_step or float(self._orig_xl[1] - self._orig_xl[0]) if len(self._orig_xl) > 1 else 1.0
+        if grid_il_step is not None:
+            self._dil = grid_il_step
+        elif len(self._orig_il) > 1:
+            self._dil = float(self._orig_il[1] - self._orig_il[0])
+        else:
+            self._dil = 1.0
+
+        if grid_xl_step is not None:
+            self._dxl = grid_xl_step
+        elif len(self._orig_xl) > 1:
+            self._dxl = float(self._orig_xl[1] - self._orig_xl[0])
+        else:
+            self._dxl = 1.0
 
         # Affine params (passed through from original 3D geometry estimation)
         self._origin_x = origin_x

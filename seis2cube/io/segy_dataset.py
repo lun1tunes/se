@@ -250,6 +250,10 @@ class SegyDataset:
         n_samples = len(f.samples)
         # sample interval from binary header (bytes 3217-3218 → segyio key)
         si_us = int(f.bin[segyio.BinField.Interval])
+        if si_us <= 0:
+            from loguru import logger
+            logger.warning("Sample interval in binary header is {} µs; defaulting to 2000 µs (2 ms)", si_us)
+            si_us = 2000
         dt_ms = si_us / 1000.0
         fmt = int(f.bin[segyio.BinField.Format])
 

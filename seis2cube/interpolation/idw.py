@@ -58,12 +58,11 @@ class IDWTimeSliceInterpolator(InterpolationStrategy):
             return result
 
         tree = cKDTree(obs_coords)
-        dists, idxs = tree.query(miss_coords, k=min(self._k, len(obs_coords)))
+        k_actual = min(self._k, len(obs_coords))
+        dists, idxs = tree.query(miss_coords, k=k_actual)
 
-        # Ensure 2D even for k=1
-        dists = np.atleast_2d(dists)
-        idxs = np.atleast_2d(idxs)
-        if dists.ndim == 1:
+        # Ensure 2D even for k=1 (cKDTree.query returns 1D when k=1)
+        if k_actual == 1:
             dists = dists[:, np.newaxis]
             idxs = idxs[:, np.newaxis]
 

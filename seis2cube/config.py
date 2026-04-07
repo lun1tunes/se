@@ -61,18 +61,18 @@ class SegyHeaderBytes(BaseModel):
     coord_units_byte: int = Field(default=89, description="Byte for coordinate units")
 
 
-class IOConfig(BaseModel):
-    mmap: bool = Field(default=True, description="Use memory-mapping via segyio f.mmap()")
-    ignore_geometry: bool = Field(default=False)
-    strict: bool = Field(default=True)
-    chunking: ChunkingConfig | None = None
-
-
 class ChunkingConfig(BaseModel):
     inline_chunk: int = Field(default=64)
     xline_chunk: int = Field(default=64)
     time_chunk: int = Field(default=256)
     format: Literal["zarr", "netcdf"] = "zarr"
+
+
+class IOConfig(BaseModel):
+    mmap: bool = Field(default=True, description="Use memory-mapping via segyio f.mmap()")
+    ignore_geometry: bool = Field(default=False)
+    strict: bool = Field(default=True)
+    chunking: ChunkingConfig | None = None
 
 
 class CRSConfig(BaseModel):
@@ -158,7 +158,7 @@ class PipelineConfig(BaseModel):
 
     @model_validator(mode="after")
     def _ensure_paths(self) -> "PipelineConfig":
-        if not self.cube3d_path.suffix.lower() in (".sgy", ".segy"):
+        if self.cube3d_path.suffix.lower() not in (".sgy", ".segy"):
             raise ValueError(f"cube3d_path must be a SEG-Y file, got {self.cube3d_path}")
         return self
 

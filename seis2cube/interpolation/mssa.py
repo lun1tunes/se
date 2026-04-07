@@ -138,6 +138,8 @@ class MSSAInterpolator(InterpolationStrategy):
     def _truncated_svd(H: np.ndarray, rank: int) -> np.ndarray:
         """Truncated SVD rank reduction."""
         rank = min(rank, min(H.shape) - 1)
+        if rank < 1:
+            return H.copy()
         try:
             from scipy.sparse.linalg import svds
             U, s, Vt = svds(H.astype(np.float64), k=rank)

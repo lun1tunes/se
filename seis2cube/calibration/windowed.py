@@ -102,6 +102,10 @@ class WindowedShiftGain(CalibrationStrategy):
 
     def _apply_array(self, amp_2d: np.ndarray, model: CalibrationModel) -> np.ndarray:
         p = model.params
+        was_1d = amp_2d.ndim == 1
+        if was_1d:
+            amp_2d = amp_2d[np.newaxis, :]
+
         n_samp = p["n_samples"]
         dt = p["dt_ms"]
         centers = np.array(p["window_centers_ms"])
@@ -110,7 +114,7 @@ class WindowedShiftGain(CalibrationStrategy):
 
         if len(centers) == 0:
             logger.warning("No accepted windows — returning unmodified data")
-            return amp_2d.copy()
+            return amp_2d[0].copy() if was_1d else amp_2d.copy()
 
         # Interpolate shift and gain to every sample
         time_axis = np.arange(n_samp) * dt
@@ -126,4 +130,5 @@ class WindowedShiftGain(CalibrationStrategy):
             # Apply time-varying gain
             out[i] *= gain_interp
 
-        return out.astype(np.float32)
+        result = out.astype(np.float32)
+        return result[0] if was_1d else result

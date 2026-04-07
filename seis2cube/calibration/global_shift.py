@@ -116,6 +116,9 @@ class GlobalShiftGainPhase(CalibrationStrategy):
 
     def _apply_array(self, amp_2d: np.ndarray, model: CalibrationModel) -> np.ndarray:
         p = model.params
+        was_1d = amp_2d.ndim == 1
+        if was_1d:
+            amp_2d = amp_2d[np.newaxis, :]
         out = amp_2d.copy()
 
         # 1. Time shift
@@ -137,4 +140,5 @@ class GlobalShiftGainPhase(CalibrationStrategy):
             for i in range(out.shape[0]):
                 out[i] = apply_matching_filter(out[i], mf)
 
-        return out.astype(np.float32)
+        result = out.astype(np.float32)
+        return result[0] if was_1d else result

@@ -23,6 +23,9 @@ dependencies = [
     "loguru>=0.7",
     "rich>=13.0",
     "click>=8.1",
+    "streamlit>=1.30",
+    "plotly>=5.18",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]

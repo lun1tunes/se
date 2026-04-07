@@ -86,9 +86,13 @@ class LinearRegressionCalibrator(CalibrationStrategy):
 
     def _apply_array(self, amp_2d: np.ndarray, model: CalibrationModel) -> np.ndarray:
         p = model.params
+        was_1d = amp_2d.ndim == 1
+        if was_1d:
+            amp_2d = amp_2d[np.newaxis, :]
+
         scaler_mean = np.array(p["scaler_mean"])
         scaler_scale = np.array(p["scaler_scale"])
-        coef = np.array(p["coef"])
+        coef = np.array(p["coef"]).ravel()  # ensure 1D
         intercept = p["intercept"]
         win = p["window_samples"]
 
@@ -98,6 +102,9 @@ class LinearRegressionCalibrator(CalibrationStrategy):
         for i in range(n_traces):
             trace = amp_2d[i]
             feats = self._trace_features(trace, win)  # (n_windows, n_feat)
+            if feats.shape[0] == 0:
+                out[i] = trace
+                continue
             X_sc = (feats - scaler_mean) / np.clip(scaler_scale, 1e-10, None)
             pred = X_sc @ coef + intercept  # (n_windows,)
             # Map window predictions back to samples (nearest window center)
@@ -105,7 +112,8 @@ class LinearRegressionCalibrator(CalibrationStrategy):
             sample_indices = np.linspace(0, n_samp - 1, n_win)
             out[i] = np.interp(np.arange(n_samp), sample_indices, pred)
 
-        return out.astype(np.float32)
+        result = out.astype(np.float32)
+        return result[0] if was_1d else result
 
     # -- internals -----------------------------------------------------------
 
