@@ -99,7 +99,7 @@ class CalibrationConfig(BaseModel):
 
 
 class InterpolationConfig(BaseModel):
-    method: InterpolationMethod = InterpolationMethod.POCS
+    method: InterpolationMethod = InterpolationMethod.IDW
     # IDW
     idw_power: float = 2.0
     idw_max_neighbours: int = 12
@@ -136,7 +136,9 @@ class PipelineConfig(BaseModel):
     """Top-level configuration for the seis2cube pipeline."""
     cube3d_path: Path
     lines2d_paths: list[Path]
-    expand_polygon_path: Path
+    expand_polygon_path: Path | None = Field(default=None, description="GeoJSON polygon; if None, auto-generated from 3D hull")
+    expand_buffer_pct: float = Field(default=50.0, description="Expansion buffer as % of mean 3D side length (used when polygon is auto-generated)")
+    max_grid_memory_gb: float = Field(default=0.7, description="Max memory for a single grid volume (GB). Grid is shrunk if exceeded.")
     out_cube_path: Path = Field(default=Path("output/extended_cube.segy"))
     qc_report_dir: Path = Field(default=Path("qc_report"))
 
@@ -158,8 +160,35 @@ class PipelineConfig(BaseModel):
 
     @model_validator(mode="after")
     def _ensure_paths(self) -> "PipelineConfig":
-        if self.cube3d_path.suffix.lower() not in (".sgy", ".segy"):
-            raise ValueError(f"cube3d_path must be a SEG-Y file, got {self.cube3d_path}")
+        import unicodedata
+
+        def _resolve_unicode(p: Path) -> Path:
+            """Try NFC/NFD normalisation to find files with Cyrillic names."""
+            if p.exists():
+                return p
+            for form in ("NFC", "NFD"):
+                normed = Path(unicodedata.normalize(form, str(p)))
+                if normed.exists():
+                    return normed
+            # Fallback: scan parent directory for a matching stem
+            parent = p.parent
+            if parent.is_dir():
+                target = unicodedata.normalize("NFC", p.name)
+                for child in parent.iterdir():
+                    if unicodedata.normalize("NFC", child.name) == target:
+                        return child
+            return p  # return as-is; downstream will report the error
+
+        self.cube3d_path = _resolve_unicode(self.cube3d_path)
+        self.lines2d_paths = [_resolve_unicode(lp) for lp in self.lines2d_paths]
+        if self.expand_polygon_path is not None:
+            self.expand_polygon_path = _resolve_unicode(self.expand_polygon_path)
+
+        # Real SEG-Y files may have no extension or non-standard ones;
+        # only reject extensions that are clearly wrong.
+        bad_exts = {".json", ".yaml", ".yml", ".txt", ".csv", ".py", ".md"}
+        if self.cube3d_path.suffix.lower() in bad_exts:
+            raise ValueError(f"cube3d_path doesn't look like a SEG-Y file, got {self.cube3d_path}")
         return self
 
     @classmethod

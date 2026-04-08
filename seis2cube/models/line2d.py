@@ -24,7 +24,7 @@ class Line2D:
     """
 
     name: str
-    path: Path
+    path: Path | None
     coords: np.ndarray            # (N, 2)
     data: np.ndarray              # (N, S)
     dt_ms: float
@@ -48,12 +48,30 @@ class Line2D:
 
     # -- utilities -----------------------------------------------------------
 
-    def resample(self, target_dt_ms: float, target_n_samples: int) -> "Line2D":
-        """Resample data to a new sample interval / trace length via linear interp."""
+    def resample(
+        self,
+        target_dt_ms: float,
+        target_n_samples: int,
+        target_delrt_ms: float | None = None,
+    ) -> "Line2D":
+        """Resample data to a new sample interval / trace length via linear interp.
+
+        Parameters
+        ----------
+        target_dt_ms : desired sample interval.
+        target_n_samples : desired number of samples per trace.
+        target_delrt_ms : desired first-sample time (delay recording time).
+            If *None*, keeps the current ``delrt_ms``.  When provided, the
+            output time axis is ``[target_delrt_ms .. target_delrt_ms + N*dt]``
+            which may differ from the source window — the interpolator will
+            fill with 0.0 outside the original range.
+        """
         from scipy.interpolate import interp1d
 
+        out_delrt = target_delrt_ms if target_delrt_ms is not None else self.delrt_ms
+
         src_t = self.time_axis_ms
-        dst_t = self.delrt_ms + np.arange(target_n_samples) * target_dt_ms
+        dst_t = out_delrt + np.arange(target_n_samples) * target_dt_ms
 
         f = interp1d(src_t, self.data, axis=1, kind="linear",
                      bounds_error=False, fill_value=0.0)
@@ -65,7 +83,7 @@ class Line2D:
             coords=self.coords.copy(),
             data=new_data,
             dt_ms=target_dt_ms,
-            delrt_ms=self.delrt_ms,
+            delrt_ms=out_delrt,
             quality_flags=self.quality_flags,
         )
 

@@ -28,7 +28,7 @@ from seis2cube.calibration.regression import LinearRegressionCalibrator
 from seis2cube.calibration.windowed import WindowedShiftGain
 from seis2cube.config import CalibrationMethod, InterpolationMethod, PipelineConfig
 from seis2cube.geometry.crs_converter import CRSConverter
-from seis2cube.geometry.geometry_model import AffineGridMapper, KDTreeMapper
+from seis2cube.geometry.geometry_model import AffineGridMapper, GeometryModel3D, KDTreeMapper
 from seis2cube.geometry.overlap_detector import OverlapDetector
 from seis2cube.interpolation.base import InterpolationStrategy
 from seis2cube.interpolation.idw import IDWTimeSliceInterpolator
@@ -92,15 +92,32 @@ class PipelineRunner:
 
     def run(self) -> Path:
         """Execute the full pipeline and return the output SEG-Y path."""
+        import time as _time
+        pipeline_t0 = _time.perf_counter()
+        step_times: dict[str, float] = {}
+
+        def _step_timer(name: str):
+            """Context-manager-like helper for step timing."""
+            class _Timer:
+                def __init__(self):
+                    self.t0 = _time.perf_counter()
+                def done(self):
+                    elapsed = _time.perf_counter() - self.t0
+                    step_times[name] = elapsed
+                    logger.info("✓ {} completed in {:.2f}s", name, elapsed)
+            return _Timer()
+
         cfg = self._cfg
 
-        # ── 1. Ingest 3D ─────────────────────────────────────────────────
+        # ── 1. Ingest 3D ─────────────────────────────────────────────
         logger.info("=== Step 1: Ingesting 3D cube ===")
+        st = _step_timer("Ingest 3D")
         with SegyDataset(cfg.cube3d_path, cfg.header_bytes, cfg.io) as ds3d:
             meta3d = ds3d.meta
             logger.info(
-                "3D cube: {} traces, {} samples, dt={} ms, format={}",
-                meta3d.n_traces, meta3d.n_samples, meta3d.dt_ms, meta3d.sample_format,
+                "3D cube: {} traces, {} samples, dt={} ms, delrt={} ms, format={}",
+                meta3d.n_traces, meta3d.n_samples, meta3d.dt_ms,
+                meta3d.delrt_ms, meta3d.sample_format,
             )
 
             coords_3d = ds3d.all_coordinates()
@@ -112,17 +129,21 @@ class PipelineRunner:
             cube_volume = self._load_3d_volume(ds3d)
             inlines_3d = meta3d.inlines
             xlines_3d = meta3d.xlines
+        st.done()
 
-        # ── 2. CRS conversion ────────────────────────────────────────────
+        # ── 2. CRS conversion ────────────────────────────────────────
         logger.info("=== Step 2: CRS conversion ===")
+        st = _step_timer("CRS conversion")
         crs_conv = CRSConverter(cfg.crs)
         if not crs_conv.is_identity:
             cx, cy = crs_conv.forward(coords_3d[:, 0], coords_3d[:, 1])
             coords_3d = np.column_stack([cx, cy])
             logger.info("Coordinates reprojected to {}", cfg.crs.target_crs)
+        st.done()
 
-        # ── 3. Build geometry model ──────────────────────────────────────
+        # ── 3. Build geometry model ──────────────────────────────────
         logger.info("=== Step 3: Building geometry model ===")
+        st = _step_timer("Geometry model")
         if inlines_3d is not None and xlines_3d is not None:
             geom = AffineGridMapper(coords_3d, inlines_3d, xlines_3d)
             logger.info("Using AffineGridMapper")
@@ -130,47 +151,55 @@ class PipelineRunner:
             assert ilxl_3d is not None
             geom = KDTreeMapper(coords_3d, ilxl_3d[:, 0], ilxl_3d[:, 1])
             logger.info("Using KDTreeMapper (fallback)")
+        st.done()
 
         # ── 4. Load expansion polygon & overlap detector ─────────────────
         logger.info("=== Step 4: Overlap detection setup ===")
-        expand_poly = OverlapDetector.load_polygon(cfg.expand_polygon_path)
-        if not crs_conv.is_identity:
-            from shapely.ops import transform as shp_transform
-            expand_poly = shp_transform(
-                lambda x, y: crs_conv.forward(np.array(x), np.array(y)), expand_poly
+        st = _step_timer("Overlap detection")
+        if cfg.expand_polygon_path is not None:
+            expand_poly = OverlapDetector.load_polygon(cfg.expand_polygon_path)
+            if not crs_conv.is_identity:
+                from shapely.ops import transform as shp_transform
+                expand_poly = shp_transform(
+                    lambda x, y: crs_conv.forward(np.array(x), np.array(y)), expand_poly
+                )
+        else:
+            expand_poly = OverlapDetector.auto_expand_polygon(
+                coords_3d, buffer_pct=cfg.expand_buffer_pct,
             )
 
         overlap = OverlapDetector.from_3d_coords(coords_3d, expand_polygon=expand_poly)
+        st.done()
 
-        # ── 5. Ingest 2D lines ───────────────────────────────────────────
+        # ── 5. Ingest 2D lines ───────────────────────────────────────
         logger.info("=== Step 5: Ingesting 2D lines ===")
+        st = _step_timer("Ingest 2D")
         lines_2d: list[Line2D] = []
         for lpath in cfg.lines2d_paths:
-            line = self._load_2d_line(lpath, crs_conv, meta3d.dt_ms, meta3d.n_samples)
+            line = self._load_2d_line(lpath, crs_conv, meta3d.dt_ms, meta3d.n_samples,
+                                         target_delrt_ms=meta3d.delrt_ms)
             lines_2d.append(line)
             logger.info("  2D line '{}': {} traces", line.name, line.n_traces)
+        st.done()
 
-        # ── 6. Build calibration pairs ───────────────────────────────────
+        # ── 6. Build calibration pairs ───────────────────────────────
         logger.info("=== Step 6: Building calibration pairs ===")
+        st = _step_timer("Build cal. pairs")
         all_train_pairs, all_test_pairs = self._build_calibration_pairs(
             lines_2d, overlap, geom, ds3d_meta=meta3d,
             cube_volume=cube_volume, inlines_3d=inlines_3d, xlines_3d=xlines_3d,
         )
+        st.done()
 
-        # ── 7. Calibrate ────────────────────────────────────────────────
+        # ── 7. Calibrate ────────────────────────────────────────────
         logger.info("=== Step 7: Calibration ===")
+        st = _step_timer("Calibration")
         calibrator = _make_calibrator(cfg)
         cal_model = calibrator.fit(all_train_pairs)
         logger.info("Calibration model fitted: {}", cal_model.method)
 
         if all_test_pairs.amp_2d.shape[0] > 0:
             metrics_before = calibrator.evaluate(all_test_pairs, cal_model)
-            # Baseline: evaluate without calibration
-            from seis2cube.calibration.base import CalibrationModel
-            identity_model = CalibrationModel(method="identity", params={
-                "shift_samples": 0, "shift_ms": 0.0, "gain": 1.0, "phase_deg": 0.0,
-                "matching_filter": None,
-            })
             # For baseline we just compare raw 2D vs 3D
             ref = all_test_pairs.amp_3d
             raw = all_test_pairs.amp_2d
@@ -186,13 +215,17 @@ class PipelineRunner:
             logger.info("Calibration test — after:  corr={:.3f} RMSE={:.4f}",
                         metrics_before["pearson_corr"], metrics_before["rmse"])
             self._qc.log_calibration(baseline_corr, baseline_rmse, metrics_before)
+        st.done()
 
-        # ── 8. Apply calibration to all 2D lines ────────────────────────
+        # ── 8. Apply calibration to all 2D lines ────────────────────
         logger.info("=== Step 8: Applying calibration ===")
+        st = _step_timer("Apply calibration")
         calibrated_lines = [calibrator.apply(line, cal_model) for line in lines_2d]
+        st.done()
 
-        # ── 9. Build target grid & sparse volume ────────────────────────
+        # ── 9. Build target grid & sparse volume ────────────────────
         logger.info("=== Step 9: Building target grid ===")
+        st = _step_timer("Build grid & inject")
         # Estimate affine params from 3D geometry
         n_il_orig = len(inlines_3d)
         n_xl_orig = len(xlines_3d)
@@ -217,16 +250,22 @@ class PipelineRunner:
             xl_step_y=float(xl_step_xy[1]),
         )
 
-        target_grid = vb.build_target_grid()
+        target_grid = vb.build_target_grid(max_volume_gb=cfg.max_grid_memory_gb)
         sparse = vb.inject_lines(target_grid, calibrated_lines)
 
         # Also inject original 3D into the extended grid
         orig_in_grid, orig_mask = vb.inject_original_3d(
             target_grid, cube_volume, inlines_3d, xlines_3d,
         )
+        # Free cube_volume — no longer needed (data copied into orig_in_grid)
+        del cube_volume
+        import gc; gc.collect()
+        logger.info("Freed cube_volume from memory")
+        st.done()
 
         # ── 10. Tune interpolation on 3D (mask simulation) ──────────────
         logger.info("=== Step 10: Tuning interpolation on 3D simulation ===")
+        st = _step_timer("Interp. simulation")
         interpolator = _make_interpolator(cfg)
 
         # Create a simulation mask inside the original 3D area
@@ -236,9 +275,11 @@ class PipelineRunner:
         sim_metrics = interpolator.fit(orig_in_grid, sim_mask)
         logger.info("Interpolation simulation metrics: {}", sim_metrics)
         self._qc.log_interpolation_sim(sim_metrics)
+        st.done()
 
         # ── 11. Reconstruct extension ────────────────────────────────────
         logger.info("=== Step 11: Reconstructing extension ===")
+        st = _step_timer("Reconstruct")
         # Combine orig + sparse into one volume for reconstruction
         combined_data = orig_in_grid.copy()
         combined_mask = orig_mask.copy()
@@ -247,12 +288,18 @@ class PipelineRunner:
         combined_data[ext_only] = np.nan_to_num(sparse.data[ext_only], nan=0.0)
         combined_mask[ext_only] = True
 
+        # Free sparse volume — data merged into combined
+        del sparse; gc.collect()
+
         from seis2cube.models.volume import SparseVolume as SV
         combined_sparse = SV(grid=target_grid, data=combined_data, mask=combined_mask)
         result = interpolator.reconstruct(combined_sparse)
+        del combined_sparse; gc.collect()
+        st.done()
 
-        # ── 12. Assemble final cube ──────────────────────────────────────
+        # ── 12. Assemble final cube ──────────────────────────────────
         logger.info("=== Step 12: Assembling final cube ===")
+        st = _step_timer("Assemble")
         final = VolumeBuilder.assemble(
             orig_vol=orig_in_grid,
             orig_mask=orig_mask,
@@ -260,9 +307,12 @@ class PipelineRunner:
             taper_width=cfg.blend.taper_width_traces if cfg.blend.enabled else 0,
             blend=cfg.blend.enabled,
         )
+        del orig_in_grid, result; gc.collect()
+        st.done()
 
-        # ── 13. Write output SEG-Y ──────────────────────────────────────
+        # ── 13. Write output SEG-Y ──────────────────────────────────
         logger.info("=== Step 13: Writing output SEG-Y ===")
+        st = _step_timer("Write SEG-Y")
         writer = SegyWriter3D(
             path=cfg.out_cube_path,
             inlines=target_grid.inlines,
@@ -275,13 +325,24 @@ class PipelineRunner:
             il_step_y=target_grid.il_step_y,
             xl_step_x=target_grid.xl_step_x,
             xl_step_y=target_grid.xl_step_y,
+            delrt_ms=meta3d.delrt_ms,
         )
         out_path = writer.write(final)
+        st.done()
 
-        # ── 14. QC report ────────────────────────────────────────────────
+        # ── 14. QC report ──────────────────────────────────────────
         logger.info("=== Step 14: QC report ===")
+        st = _step_timer("QC report")
         self._qc.save(cfg)
+        st.done()
 
+        # ── Summary ──────────────────────────────────────────────
+        total_elapsed = _time.perf_counter() - pipeline_t0
+        logger.info("\n═══ Pipeline Timing Summary ═══")
+        for name, t in step_times.items():
+            pct = 100 * t / max(total_elapsed, 1e-9)
+            logger.info("  {:<25s} {:>7.2f}s  ({:>5.1f}%)", name, t, pct)
+        logger.info("  {:<25s} {:>7.2f}s", "TOTAL", total_elapsed)
         logger.info("Pipeline complete. Output: {}", out_path)
         return out_path
 
@@ -290,6 +351,8 @@ class PipelineRunner:
     @staticmethod
     def _load_3d_volume(ds: SegyDataset) -> np.ndarray:
         """Load a structured 3D SEG-Y into (n_il, n_xl, n_samp) array."""
+        import time as _time
+
         meta = ds.meta
         if not meta.is_structured:
             raise RuntimeError("3D cube must be opened in structured mode (check header bytes / strict)")
@@ -297,9 +360,24 @@ class PipelineRunner:
         n_xl = len(meta.xlines)
         n_samp = meta.n_samples
         vol = np.empty((n_il, n_xl, n_samp), dtype=np.float32)
+
+        t0 = _time.perf_counter()
+        log_every = max(1, n_il // 10)
         for i, il in enumerate(meta.inlines):
             vol[i] = ds.read_inline(int(il))
-        logger.info("3D volume loaded: shape={}", vol.shape)
+            if (i + 1) % log_every == 0:
+                elapsed = _time.perf_counter() - t0
+                pct = 100 * (i + 1) / n_il
+                rate = (i + 1) / max(elapsed, 1e-9)
+                eta = (n_il - i - 1) / max(rate, 1e-9)
+                logger.info(
+                    "Loading 3D volume: {}/{} inlines ({:.0f}%), {:.1f}s elapsed, ETA {:.1f}s",
+                    i + 1, n_il, pct, elapsed, eta,
+                )
+
+        elapsed = _time.perf_counter() - t0
+        size_mb = vol.nbytes / (1024 * 1024)
+        logger.info("3D volume loaded: shape={}, {:.1f} MB in {:.2f}s", vol.shape, size_mb, elapsed)
         return vol
 
     def _load_2d_line(
@@ -308,8 +386,17 @@ class PipelineRunner:
         crs_conv: CRSConverter,
         target_dt_ms: float,
         target_n_samples: int,
+        target_delrt_ms: float = 0.0,
     ) -> Line2D:
-        """Load a single 2D SEG-Y profile."""
+        """Load a single 2D SEG-Y profile and align to the 3D time window.
+
+        Parameters
+        ----------
+        target_dt_ms, target_n_samples, target_delrt_ms :
+            Time-grid parameters of the 3D cube. The 2D line will be
+            resampled / windowed so its time axis matches
+            [target_delrt_ms .. target_delrt_ms + target_n_samples * target_dt_ms].
+        """
         from seis2cube.config import IOConfig, SegyHeaderBytes
         io_cfg = IOConfig(
             mmap=self._cfg.io.mmap,
@@ -322,10 +409,9 @@ class PipelineRunner:
                 cx, cy = crs_conv.forward(coords[:, 0], coords[:, 1])
                 coords = np.column_stack([cx, cy])
 
-            n = ds.n_traces
-            data = np.empty((n, ds.n_samples), dtype=np.float32)
-            for i in range(n):
-                data[i] = ds.read_trace(i)
+            # Bulk-read all traces at once via public API
+            data = ds.read_all_traces()
+            line_delrt = ds.delrt_ms
 
             line = Line2D(
                 name=path.stem,
@@ -333,15 +419,25 @@ class PipelineRunner:
                 coords=coords,
                 data=data,
                 dt_ms=ds.dt_ms,
+                delrt_ms=line_delrt,
             )
 
-        # Resample to match 3D if needed
-        if abs(line.dt_ms - target_dt_ms) > 0.01 or line.n_samples != target_n_samples:
+        # Resample / window to match the 3D cube time axis
+        needs_resample = (
+            abs(line.dt_ms - target_dt_ms) > 0.01
+            or line.n_samples != target_n_samples
+            or abs(line.delrt_ms - target_delrt_ms) > 0.01
+        )
+        if needs_resample:
             logger.info(
-                "Resampling '{}': dt {:.2f}→{:.2f} ms, nsamp {}→{}",
-                line.name, line.dt_ms, target_dt_ms, line.n_samples, target_n_samples,
+                "Resampling '{}': dt {:.2f}→{:.2f} ms, nsamp {}→{}, "
+                "delrt {:.1f}→{:.1f} ms",
+                line.name, line.dt_ms, target_dt_ms,
+                line.n_samples, target_n_samples,
+                line.delrt_ms, target_delrt_ms,
             )
-            line = line.resample(target_dt_ms, target_n_samples)
+            line = line.resample(target_dt_ms, target_n_samples,
+                                 target_delrt_ms=target_delrt_ms)
 
         return line
 

@@ -53,6 +53,7 @@ class SegyMeta:
     dt_ms: float  # milliseconds
     sample_format: int
     is_structured: bool
+    delrt_ms: float = 0.0  # delay recording time of first trace (ms)
     inlines: np.ndarray | None = field(default=None)
     xlines: np.ndarray | None = field(default=None)
 
@@ -140,9 +141,14 @@ class SegyDataset:
         return self.meta.dt_ms
 
     @property
+    def delrt_ms(self) -> float:
+        """Delay recording time (first sample time) in ms."""
+        return self.meta.delrt_ms
+
+    @property
     def time_axis_ms(self) -> np.ndarray:
-        """Time axis in ms starting from 0."""
-        return np.arange(self.n_samples) * self.dt_ms
+        """Time axis in ms starting from delay recording time."""
+        return self.meta.delrt_ms + np.arange(self.n_samples) * self.dt_ms
 
     # -- coordinate helpers --------------------------------------------------
 
@@ -221,6 +227,10 @@ class SegyDataset:
             out[i] = self._f.trace[int(idx)]  # type: ignore[union-attr]
         return out
 
+    def read_all_traces(self) -> np.ndarray:
+        """Bulk-read all traces into (n_traces, n_samples) array — fast path."""
+        return np.array(self._f.trace.raw[:], dtype=np.float32)  # type: ignore[union-attr]
+
     def iter_traces(self) -> Iterator[tuple[TraceHeader, np.ndarray]]:
         """Iterate lazily over (header, samples) for every trace."""
         for i in range(self.n_traces):
@@ -262,6 +272,9 @@ class SegyDataset:
         ilines = np.array(f.ilines) if is_structured else None
         xlines = np.array(f.xlines) if is_structured else None
 
+        # Read delay recording time from first trace
+        delrt_ms = float(f.header[0].get(segyio.TraceField.DelayRecordingTime, 0))
+
         return SegyMeta(
             path=self._path,
             n_traces=n_traces,
@@ -270,6 +283,7 @@ class SegyDataset:
             dt_ms=dt_ms,
             sample_format=fmt,
             is_structured=is_structured,
+            delrt_ms=delrt_ms,
             inlines=ilines,
             xlines=xlines,
         )

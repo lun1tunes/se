@@ -46,6 +46,11 @@ class POCSInterpolator(InterpolationStrategy):
         threshold_start_pct: float = 99.0,
         threshold_end_pct: float = 1.0,
     ) -> None:
+        if transform not in ("fft",):
+            raise ValueError(
+                f"transform='{transform}' is not supported. "
+                f"Only 'fft' is currently implemented. Wavelet support is planned."
+            )
         self._niter = n_iter
         self._transform = transform
         self._fast = fast
@@ -68,53 +73,77 @@ class POCSInterpolator(InterpolationStrategy):
 
     def reconstruct(self, sparse: SparseVolume) -> InterpolationResult:
         data = np.nan_to_num(sparse.data, nan=0.0).astype(np.float32)
-        recon = self._pocs_3d(data, sparse.mask)
-        costs = []  # cost history populated during reconstruction
+        costs: list[float] = []
+        recon = self._pocs_3d(data, sparse.mask, _cost_out=costs)
         return InterpolationResult(volume=recon, cost_history=costs)
 
     # -- core POCS -----------------------------------------------------------
 
-    def _pocs_3d(self, data: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def _pocs_3d(
+        self, data: np.ndarray, mask: np.ndarray, *, _cost_out: list | None = None,
+    ) -> np.ndarray:
         """Run POCS on a 3D volume (il, xl, samp).
 
         Operates on 2D spatial slices (il, xl) for each time sample.
+        Uses rFFT for real-valued seismic data (~2× faster than full FFT).
         """
+        import time as _time
+
         n_il, n_xl, n_samp = data.shape
         result = data.copy()
 
         thresholds = self._threshold_schedule(self._niter)
 
-        mask_3d = np.broadcast_to(mask[:, :, np.newaxis], data.shape)
+        # Pre-compute observation indices for fast re-insertion
+        obs_il, obs_xl = np.where(mask)
+        obs_data = data[obs_il, obs_xl, :]  # (n_obs, n_samp)
+        spatial_shape = (n_il, n_xl)
+        miss = ~mask  # pre-compute loop-invariant missing mask
 
         logger.info(
-            "POCS: {} iter, transform={}, fast={}, schedule={}",
+            "POCS: {} iter, transform={}, fast={}, schedule={}, volume={}x{}x{}",
             self._niter, self._transform, self._fast, self._sched,
+            n_il, n_xl, n_samp,
         )
+        log_every = max(1, self._niter // 10)
+        t_start = _time.perf_counter()
 
         for it in range(self._niter):
             thr = thresholds[it]
 
-            # Forward transform (per time-sample slice for FFT, or full 3D)
+            # Forward transform — rFFT along spatial axes for real data
             if self._transform == "fft":
-                coeffs = np.fft.fftn(result, axes=(0, 1))
+                coeffs = np.fft.rfftn(result, axes=(0, 1))
             else:
                 coeffs = self._wavelet_forward(result)
 
             # Thresholding (soft)
-            coeffs = self._soft_threshold(coeffs, thr)
+            self._soft_threshold_inplace(coeffs, thr)
 
             # Inverse transform
             if self._transform == "fft":
-                result = np.real(np.fft.ifftn(coeffs, axes=(0, 1))).astype(np.float32)
+                result = np.fft.irfftn(coeffs, s=spatial_shape, axes=(0, 1)).astype(np.float32)
             else:
                 result = self._wavelet_inverse(coeffs)
 
-            # Re-insert observations
-            result[mask_3d] = data[mask_3d]
+            # Re-insert observations (indexed, avoids broadcast_to allocation)
+            result[obs_il, obs_xl, :] = obs_data
 
-            if (it + 1) % max(1, self._niter // 5) == 0:
-                logger.debug("POCS iter {}/{}, threshold={:.4f}", it + 1, self._niter, thr)
+            # Track convergence cost
+            if _cost_out is not None:
+                cost = float(np.mean(result[miss, :] ** 2))
+                _cost_out.append(cost)
 
+            if (it + 1) % log_every == 0:
+                elapsed = _time.perf_counter() - t_start
+                logger.info(
+                    "POCS iter {}/{} ({:.0f}%), thr={:.4f}, elapsed={:.1f}s",
+                    it + 1, self._niter, 100 * (it + 1) / self._niter, thr, elapsed,
+                )
+
+        total = _time.perf_counter() - t_start
+        logger.info("POCS completed {} iterations in {:.2f}s ({:.3f}s/iter)",
+                    self._niter, total, total / max(self._niter, 1))
         return result
 
     def _threshold_schedule(self, n: int) -> np.ndarray:
@@ -133,38 +162,40 @@ class POCSInterpolator(InterpolationStrategy):
         return np.linspace(t_start, t_end, n)
 
     @staticmethod
-    def _soft_threshold(coeffs: np.ndarray, thr_pct: float) -> np.ndarray:
-        """Soft thresholding: zero coefficients below percentile threshold."""
+    def _soft_threshold_inplace(coeffs: np.ndarray, thr_pct: float) -> None:
+        """In-place soft thresholding — avoids large temporary allocations."""
         abs_c = np.abs(coeffs)
-        thr_val = np.percentile(abs_c, thr_pct)
-        # Soft shrinkage
-        sign = np.exp(1j * np.angle(coeffs)) if np.iscomplexobj(coeffs) else np.sign(coeffs)
-        shrunk = np.maximum(abs_c - thr_val, 0.0)
-        return (sign * shrunk).astype(coeffs.dtype)
+        # Use partial sort (O(n)) instead of full sort percentile for large arrays
+        flat = abs_c.ravel()
+        k = int(thr_pct / 100.0 * len(flat))
+        if k <= 0 or k >= len(flat):
+            return
+        thr_val = np.partition(flat, k)[k]  # O(n) vs O(n log n) for percentile
+        # In-place shrinkage: coeffs *= max(|c| - thr, 0) / |c|
+        # This preserves phase for complex, sign for real
+        np.clip(abs_c, 1e-30, None, out=abs_c)  # avoid div-by-zero
+        scale = np.maximum(abs_c - thr_val, 0.0)
+        scale /= abs_c
+        coeffs *= scale
 
     # -- wavelet stubs (require pywt) ----------------------------------------
 
     @staticmethod
     def _wavelet_forward(data: np.ndarray) -> np.ndarray:
-        """2D DWT per time sample using PyWavelets (if available).
+        """2D DWT per time sample using PyWavelets.
 
-        Falls back to FFT if pywt is not installed.
+        Raises NotImplementedError — wavelet round-trip is not yet implemented.
+        Use transform='fft' instead.
         """
-        try:
-            import pywt  # noqa: F401
-        except ImportError:
-            logger.warning("pywt not installed — falling back to FFT")
-            return np.fft.fftn(data, axes=(0, 1))
-
-        # pywt available but wavelet round-trip bookkeeping is complex;
-        # fall back to FFT for production safety.
-        logger.debug("Wavelet transform not fully implemented — using FFT")
-        return np.fft.fftn(data, axes=(0, 1))
+        raise NotImplementedError(
+            "Wavelet transform is not implemented. Use transform='fft' (or 'fpocs') instead. "
+            "Set transform='fft' in your InterpolationConfig."
+        )
 
     @staticmethod
     def _wavelet_inverse(coeffs: np.ndarray) -> np.ndarray:
-        """Inverse 2D DWT — falls back to IFFT (matches _wavelet_forward)."""
-        return np.real(np.fft.ifftn(coeffs, axes=(0, 1))).astype(np.float32)
+        """Inverse 2D DWT — not implemented."""
+        raise NotImplementedError("Wavelet inverse is not implemented.")
 
     # -- evaluation ----------------------------------------------------------
 

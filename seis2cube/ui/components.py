@@ -117,7 +117,9 @@ def plot_time_slice(
     else:
         slice_data = data
 
-    vmax = np.percentile(np.abs(slice_data[np.isfinite(slice_data)]), 98) if np.any(np.isfinite(slice_data)) else 1.0
+    finite_vals = slice_data[np.isfinite(slice_data)]
+    vmax = float(np.percentile(np.abs(finite_vals), 98)) if len(finite_vals) > 0 else 1.0
+    vmax = max(vmax, 1e-10)  # avoid zero range
 
     fig = go.Figure(data=go.Heatmap(
         z=slice_data,
@@ -152,7 +154,9 @@ def plot_inline_section(
     """Plot an inline section (xline vs time)."""
     section = data[il_idx, :, :]  # (n_xl, n_samp)
 
-    vmax = np.percentile(np.abs(section[np.isfinite(section)]), 98) if np.any(np.isfinite(section)) else 1.0
+    finite_vals = section[np.isfinite(section)]
+    vmax = float(np.percentile(np.abs(finite_vals), 98)) if len(finite_vals) > 0 else 1.0
+    vmax = max(vmax, 1e-10)
 
     fig = go.Figure(data=go.Heatmap(
         z=section.T,

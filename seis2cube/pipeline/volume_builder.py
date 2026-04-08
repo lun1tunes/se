@@ -79,7 +79,7 @@ class VolumeBuilder:
         self._xl_step_x = xl_step_x
         self._xl_step_y = xl_step_y
 
-    def build_target_grid(self) -> TargetGrid:
+    def build_target_grid(self, max_volume_gb: float = 0.0) -> TargetGrid:
         """Compute extended inline/xline ranges covering both the original 3D and the polygon."""
         # Get polygon bounding box in world coordinates
         minx, miny, maxx, maxy = self._expand_poly.bounds
@@ -106,6 +106,34 @@ class VolumeBuilder:
         inlines = np.arange(il_min, il_max + 1, dil, dtype=np.int32)
         xlines = np.arange(xl_min, xl_max + 1, dxl, dtype=np.int32)
 
+        # ── Memory safety: shrink extension range if grid exceeds limit ──
+        if max_volume_gb > 0:
+            vol_bytes = len(inlines) * len(xlines) * self._n_samp * 4
+            vol_gb = vol_bytes / (1024 ** 3)
+            if vol_gb > max_volume_gb:
+                # Shrink the extension symmetrically while keeping
+                # original IL/XL fully inside. We reduce the total range
+                # until the volume fits.
+                scale = (max_volume_gb / vol_gb) ** 0.5
+                n_il_target = max(int(len(inlines) * scale), len(self._orig_il))
+                n_xl_target = max(int(len(xlines) * scale), len(self._orig_xl))
+                # Centre the new range on the original 3D centre
+                il_ctr = (self._orig_il.min() + self._orig_il.max()) / 2.0
+                xl_ctr = (self._orig_xl.min() + self._orig_xl.max()) / 2.0
+                il_half = (n_il_target // 2) * dil
+                xl_half = (n_xl_target // 2) * dxl
+                il_min = int(il_ctr - il_half)
+                il_max = int(il_ctr + il_half)
+                xl_min = int(xl_ctr - xl_half)
+                xl_max = int(xl_ctr + xl_half)
+                inlines = np.arange(il_min, il_max + 1, dil, dtype=np.int32)
+                xlines = np.arange(xl_min, xl_max + 1, dxl, dtype=np.int32)
+                new_gb = len(inlines) * len(xlines) * self._n_samp * 4 / (1024**3)
+                logger.warning(
+                    "Grid {:.2f} GB exceeds limit {:.2f} GB → shrunk to {} × {} ({:.2f} GB)",
+                    vol_gb, max_volume_gb, len(inlines), len(xlines), new_gb,
+                )
+
         logger.info(
             "Target grid: IL [{}, {}] step {}, XL [{}, {}] step {}, {} × {} × {}",
             il_min, il_max, dil, xl_min, xl_max, dxl,
@@ -131,25 +159,42 @@ class VolumeBuilder:
         lines: list[Line2D],
     ) -> SparseVolume:
         """Place calibrated 2D traces into the sparse volume at their nearest grid positions."""
+        import time as _time
+        t0 = _time.perf_counter()
+
         sparse = SparseVolume.empty(grid)
+        il_arr = grid.inlines
+        xl_arr = grid.xlines
+        n_samp = grid.n_samples
+        total_inserted = 0
 
-        for line in lines:
+        for li, line in enumerate(lines):
             il_frac, xl_frac = self._geom.xy_to_ilxl(line.coords[:, 0], line.coords[:, 1])
-            for t_idx in range(line.n_traces):
-                il_nearest = int(round(il_frac[t_idx]))
-                xl_nearest = int(round(xl_frac[t_idx]))
-                try:
-                    ii = grid.il_index(il_nearest)
-                    xi = grid.xl_index(xl_nearest)
-                except KeyError:
-                    continue
+            # Vectorised nearest-grid lookup
+            il_nearest = np.rint(il_frac).astype(np.int32)
+            xl_nearest = np.rint(xl_frac).astype(np.int32)
+            ii_idx = np.searchsorted(il_arr, il_nearest)
+            xi_idx = np.searchsorted(xl_arr, xl_nearest)
+            # Mask valid grid positions
+            valid = (
+                (ii_idx < len(il_arr)) & (xi_idx < len(xl_arr))
+                & (il_arr[np.clip(ii_idx, 0, len(il_arr) - 1)] == il_nearest)
+                & (xl_arr[np.clip(xi_idx, 0, len(xl_arr) - 1)] == xl_nearest)
+            )
+            for t_idx in np.where(valid)[0]:
                 trace = line.data[t_idx]
-                # Pad or trim to grid n_samples
-                if len(trace) < grid.n_samples:
-                    trace = np.pad(trace, (0, grid.n_samples - len(trace)))
-                sparse.insert_trace(ii, xi, trace[:grid.n_samples])
+                if len(trace) < n_samp:
+                    trace = np.pad(trace, (0, n_samp - len(trace)))
+                sparse.insert_trace(int(ii_idx[t_idx]), int(xi_idx[t_idx]), trace[:n_samp])
+                total_inserted += 1
 
-        logger.info("Sparse volume fill ratio: {:.2%}", sparse.fill_ratio)
+            logger.debug("Line '{}': {}/{} traces injected", line.name, int(valid.sum()), line.n_traces)
+
+        elapsed = _time.perf_counter() - t0
+        logger.info(
+            "Sparse volume: {} traces injected, fill={:.2%}, elapsed={:.2f}s",
+            total_inserted, sparse.fill_ratio, elapsed,
+        )
         return sparse
 
     def inject_original_3d(
@@ -159,30 +204,42 @@ class VolumeBuilder:
         orig_inlines: np.ndarray,
         orig_xlines: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Place original 3D data into the extended grid.
+        """Place original 3D data into the extended grid (vectorised).
 
         Returns
         -------
         full_vol : (grid.n_il, grid.n_xl, grid.n_samples) with orig data placed.
         orig_mask : (grid.n_il, grid.n_xl) bool — True where original data exists.
         """
+        import time as _time
+        t0 = _time.perf_counter()
+
         full_vol = np.zeros(grid.shape, dtype=np.float32)
         orig_mask = np.zeros((grid.n_il, grid.n_xl), dtype=bool)
 
-        for i, il in enumerate(orig_inlines):
-            for j, xl in enumerate(orig_xlines):
-                try:
-                    ii = grid.il_index(int(il))
-                    xi = grid.xl_index(int(xl))
-                except KeyError:
-                    continue
-                n = min(volume.shape[2], grid.n_samples)
-                full_vol[ii, xi, :n] = volume[i, j, :n]
-                orig_mask[ii, xi] = True
+        # Vectorised index mapping: find where orig inlines/xlines sit in the grid
+        ii_idx = np.searchsorted(grid.inlines, orig_inlines)
+        xi_idx = np.searchsorted(grid.xlines, orig_xlines)
 
+        # Validity masks
+        il_valid = (ii_idx < len(grid.inlines)) & (grid.inlines[np.clip(ii_idx, 0, len(grid.inlines) - 1)] == orig_inlines)
+        xl_valid = (xi_idx < len(grid.xlines)) & (grid.xlines[np.clip(xi_idx, 0, len(grid.xlines) - 1)] == orig_xlines)
+
+        valid_il = np.where(il_valid)[0]
+        valid_xl = np.where(xl_valid)[0]
+
+        n = min(volume.shape[2], grid.n_samples)
+
+        # Vectorised block copy — slice entire valid inlines at once
+        for i in valid_il:
+            gi = ii_idx[i]
+            full_vol[gi, xi_idx[valid_xl], :n] = volume[i, valid_xl, :n]
+            orig_mask[gi, xi_idx[valid_xl]] = True
+
+        elapsed = _time.perf_counter() - t0
         logger.info(
-            "Original 3D injected: {} / {} positions",
-            orig_mask.sum(), orig_mask.size,
+            "Original 3D injected: {} / {} positions in {:.2f}s",
+            orig_mask.sum(), orig_mask.size, elapsed,
         )
         return full_vol, orig_mask
 

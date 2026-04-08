@@ -1,0 +1,48 @@
+cube3d_path: "test_data/Амплитудный 3Д куб"
+
+lines2d_paths:
+  - "test_data/2Д_профиль1"
+  - "test_data/2Д_профиль2"
+  - "test_data/2Д_профиль3"
+  - "test_data/2Д_профиль4"
+  - "test_data/2Д_профиль6"
+  - "test_data/2Д_профиль7"
+  - "test_data/2Д_профиль8"
+  - "test_data/2Д_профиль11"
+  - "test_data/2Д_профиль12"
+  - "test_data/2Д_профиль13"
+  - "test_data/2Д_профиль16"
+  - "test_data/2Д_профиль17"
+  - "test_data/2Д_профиль18"
+
+expand_polygon_path: "test_data/expand_polygon.geojson"
+out_cube_path: "output/extended_cube.segy"
+qc_report_dir: "qc_report"
+
+header_bytes:
+  inline: 189
+  xline: 193
+  coord_source: "cdp"
+
+io:
+  mmap: true
+  strict: true
+
+crs:
+  target_crs: "EPSG:32637"
+
+calibration:
+  method: "global_shift"
+  holdout_fraction: 0.2
+
+interpolation:
+  method: "idw"
+  idw_power: 2.0
+  idw_max_neighbours: 12
+
+compute:
+  backend: "numpy"
+
+blend:
+  enabled: true
+  taper_width_traces: 10

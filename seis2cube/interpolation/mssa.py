@@ -67,31 +67,66 @@ class MSSAInterpolator(InterpolationStrategy):
         For efficiency, process inline-by-inline: each "section" is
         (n_xl, n_samp) — a 2D matrix suitable for Hankel embedding + SVD.
         """
+        import time as _time
+
         n_il, n_xl, n_samp = data.shape
         result = data.copy()
-        mask_3d = np.broadcast_to(mask[:, :, np.newaxis], data.shape)
 
-        logger.info("MSSA: rank={}, window={}, iter={}", self._rank, self._window, self._niter)
+        # Pre-compute observation indices for fast re-insertion
+        obs_il, obs_xl = np.where(mask)
+        obs_data = data[obs_il, obs_xl, :]
+
+        logger.info(
+            "MSSA: rank={}, window={}, iter={}, volume={}x{}x{}",
+            self._rank, self._window, self._niter, n_il, n_xl, n_samp,
+        )
+
+        # ── Inline pass ──────────────────────────────────────────────
+        t0 = _time.perf_counter()
+        n_il_todo = int((~mask.all(axis=1)).sum())
+        done = 0
+        log_every = max(1, n_il_todo // 10)
 
         for il_idx in range(n_il):
-            section = result[il_idx]  # (n_xl, n_samp)
             section_mask = mask[il_idx]  # (n_xl,) bool
             if section_mask.all():
-                continue  # nothing to reconstruct
+                continue
+            result[il_idx] = self._mssa_section(result[il_idx], section_mask)
+            done += 1
+            if done % log_every == 0:
+                elapsed = _time.perf_counter() - t0
+                logger.info(
+                    "MSSA inline pass: {}/{} ({:.0f}%), elapsed={:.1f}s",
+                    done, n_il_todo, 100 * done / max(n_il_todo, 1), elapsed,
+                )
 
-            result[il_idx] = self._mssa_section(section, section_mask)
+        t_il = _time.perf_counter() - t0
+        logger.info("MSSA inline pass done in {:.2f}s", t_il)
 
-        # Also run along crosslines for better quality
+        # ── Crossline pass ───────────────────────────────────────────
+        t0 = _time.perf_counter()
+        n_xl_todo = int((~mask.all(axis=0)).sum())
+        done = 0
+        log_every = max(1, n_xl_todo // 10)
+
         for xl_idx in range(n_xl):
-            section = result[:, xl_idx, :]  # (n_il, n_samp)
             section_mask = mask[:, xl_idx]
             if section_mask.all():
                 continue
+            result[:, xl_idx, :] = self._mssa_section(result[:, xl_idx, :], section_mask)
+            done += 1
+            if done % log_every == 0:
+                elapsed = _time.perf_counter() - t0
+                logger.info(
+                    "MSSA crossline pass: {}/{} ({:.0f}%), elapsed={:.1f}s",
+                    done, n_xl_todo, 100 * done / max(n_xl_todo, 1), elapsed,
+                )
 
-            result[:, xl_idx, :] = self._mssa_section(section, section_mask)
+        t_xl = _time.perf_counter() - t0
+        logger.info("MSSA crossline pass done in {:.2f}s  (total {:.2f}s)", t_xl, t_il + t_xl)
 
         # Re-insert observations
-        result[mask_3d] = data[mask_3d]
+        result[obs_il, obs_xl, :] = obs_data
         return result
 
     def _mssa_section(self, section: np.ndarray, trace_mask: np.ndarray) -> np.ndarray:
@@ -124,27 +159,48 @@ class MSSAInterpolator(InterpolationStrategy):
     def _build_hankel(data: np.ndarray, w: int) -> np.ndarray:
         """Build block-Hankel matrix from (n_traces, n_samples).
 
-        Each column is a window of *w* consecutive traces (all samples).
+        Uses stride tricks for zero-copy sliding window — O(1) construction.
         Output shape: (w * n_samples, n_traces - w + 1).
         """
         n_tr, n_samp = data.shape
         n_cols = n_tr - w + 1
-        H = np.empty((w * n_samp, n_cols), dtype=data.dtype)
-        for j in range(n_cols):
-            H[:, j] = data[j: j + w, :].ravel()
-        return H
+        # Sliding window view: (n_cols, w, n_samp)
+        row_stride, col_stride = data.strides
+        windowed = np.lib.stride_tricks.as_strided(
+            data,
+            shape=(n_cols, w, n_samp),
+            strides=(row_stride, row_stride, col_stride),
+        )
+        # Reshape to (n_cols, w*n_samp) then transpose → (w*n_samp, n_cols)
+        return np.ascontiguousarray(windowed.reshape(n_cols, w * n_samp).T)
 
     @staticmethod
     def _truncated_svd(H: np.ndarray, rank: int) -> np.ndarray:
-        """Truncated SVD rank reduction."""
+        """Truncated SVD rank reduction.
+
+        Uses randomized SVD (sklearn) for large matrices — O(m·n·k) instead of O(m·n·min(m,n)).
+        Falls back to scipy sparse svds, then full SVD.
+        """
         rank = min(rank, min(H.shape) - 1)
         if rank < 1:
             return H.copy()
+
+        H64 = H.astype(np.float64)
+
+        # Prefer randomized SVD for large matrices (much faster)
+        if min(H.shape) > 100 and rank < min(H.shape) // 2:
+            try:
+                from sklearn.utils.extmath import randomized_svd
+                U, s, Vt = randomized_svd(H64, n_components=rank, random_state=42)
+                return (U * s) @ Vt
+            except ImportError:
+                pass
+
         try:
             from scipy.sparse.linalg import svds
-            U, s, Vt = svds(H.astype(np.float64), k=rank)
+            U, s, Vt = svds(H64, k=rank)
         except Exception:
-            U, s, Vt = np.linalg.svd(H.astype(np.float64), full_matrices=False)
+            U, s, Vt = np.linalg.svd(H64, full_matrices=False)
             U = U[:, :rank]
             s = s[:rank]
             Vt = Vt[:rank, :]
@@ -154,15 +210,19 @@ class MSSAInterpolator(InterpolationStrategy):
     def _hankel_to_traces(
         H: np.ndarray, n_tr: int, n_samp: int, w: int
     ) -> np.ndarray:
-        """Invert Hankel embedding via diagonal averaging."""
+        """Invert Hankel embedding via diagonal averaging (vectorised)."""
         n_cols = n_tr - w + 1
-        result = np.zeros((n_tr, n_samp), dtype=H.dtype)
+        result = np.zeros((n_tr, n_samp), dtype=np.float64)
         counts = np.zeros(n_tr, dtype=np.float64)
-        for j in range(n_cols):
-            col = H[:, j].reshape(w, n_samp)
-            for k in range(w):
-                result[j + k] += col[k]
-                counts[j + k] += 1.0
+
+        # Reshape columns into (n_cols, w, n_samp) for batch accumulation
+        cols = H.T.reshape(n_cols, w, n_samp)  # (n_cols, w, n_samp)
+        # Build index array: for each column j and window position k, target = j+k
+        j_idx = np.arange(n_cols)[:, None] + np.arange(w)[None, :]  # (n_cols, w)
+        # Accumulate using add.at for proper handling of repeated indices
+        np.add.at(result, j_idx.ravel(), cols.reshape(-1, n_samp))
+        np.add.at(counts, j_idx.ravel(), 1.0)
+
         result /= counts[:, np.newaxis]
         return result.astype(np.float32)
 

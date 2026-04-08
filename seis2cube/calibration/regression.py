@@ -132,30 +132,35 @@ class LinearRegressionCalibrator(CalibrationStrategy):
 
     @staticmethod
     def _trace_features(trace: np.ndarray, win: int) -> np.ndarray:
-        """Extract feature vectors for non-overlapping windows of a trace."""
+        """Extract feature vectors for non-overlapping windows of a trace (vectorised)."""
         n = len(trace)
+        n_win = n // win
+        if n_win == 0:
+            return np.empty((0, 6), dtype=np.float64)
+
         env = envelope(trace)
         grad = np.gradient(trace)
-        feats = []
-        for s in range(0, n - win + 1, win):
-            w = trace[s: s + win]
-            we = env[s: s + win]
-            wg = grad[s: s + win]
-            feats.append([
-                np.mean(w),
-                np.std(w),
-                np.sqrt(np.mean(w ** 2)),
-                np.mean(we),
-                np.max(we),
-                np.sqrt(np.mean(wg ** 2)),
-            ])
-        return np.array(feats, dtype=np.float64) if feats else np.empty((0, 6), dtype=np.float64)
+
+        # Reshape into (n_win, win) blocks — no copy
+        tw = trace[:n_win * win].reshape(n_win, win)
+        ew = env[:n_win * win].reshape(n_win, win)
+        gw = grad[:n_win * win].reshape(n_win, win)
+
+        feats = np.column_stack([
+            tw.mean(axis=1),
+            tw.std(axis=1),
+            np.sqrt((tw ** 2).mean(axis=1)),
+            ew.mean(axis=1),
+            ew.max(axis=1),
+            np.sqrt((gw ** 2).mean(axis=1)),
+        ])
+        return feats.astype(np.float64)
 
     @staticmethod
     def _trace_targets(trace: np.ndarray, win: int) -> np.ndarray:
-        """Mean 3D amplitude per window — the regression target."""
+        """Mean 3D amplitude per window — the regression target (vectorised)."""
         n = len(trace)
-        targets = []
-        for s in range(0, n - win + 1, win):
-            targets.append(np.mean(trace[s: s + win]))
-        return np.array(targets, dtype=np.float64)
+        n_win = n // win
+        if n_win == 0:
+            return np.empty(0, dtype=np.float64)
+        return trace[:n_win * win].reshape(n_win, win).mean(axis=1).astype(np.float64)

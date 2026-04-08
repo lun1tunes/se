@@ -121,14 +121,25 @@ class WindowedShiftGain(CalibrationStrategy):
         shift_interp = np.interp(time_axis, centers, shifts_s)
         gain_interp = np.interp(time_axis, centers, gains_arr)
 
-        out = np.empty_like(amp_2d)
-        for i in range(amp_2d.shape[0]):
-            # Apply time-varying shift via interpolation
-            src_indices = np.arange(n_samp, dtype=np.float64) - shift_interp
-            out[i] = np.interp(src_indices, np.arange(n_samp, dtype=np.float64), amp_2d[i],
-                               left=0.0, right=0.0)
-            # Apply time-varying gain
-            out[i] *= gain_interp
+        # Vectorised: apply time-varying shift to all traces at once
+        # using scipy.ndimage.map_coordinates (batch-capable)
+        from scipy.ndimage import map_coordinates
+
+        n_traces = amp_2d.shape[0]
+        src_indices = np.arange(n_samp, dtype=np.float64) - shift_interp  # (n_samp,)
+
+        # map_coordinates expects (n_dims, n_points) coordinate arrays
+        # For each trace i, we sample at (i, src_indices[j]) for all j
+        row_coords = np.repeat(np.arange(n_traces, dtype=np.float64), n_samp)
+        col_coords = np.tile(src_indices, n_traces)
+        coords = np.array([row_coords, col_coords])
+
+        out = map_coordinates(
+            amp_2d.astype(np.float64), coords, order=1, mode='constant', cval=0.0,
+        ).reshape(n_traces, n_samp)
+
+        # Apply time-varying gain (broadcast over all traces)
+        out *= gain_interp[np.newaxis, :]
 
         result = out.astype(np.float32)
         return result[0] if was_1d else result

@@ -44,6 +44,25 @@ class OverlapDetector:
             hull = hull.convex_hull
         return cls(cube3d_polygon=hull, expand_polygon=expand_polygon)
 
+    @staticmethod
+    def auto_expand_polygon(
+        coords_3d: np.ndarray,
+        buffer_pct: float = 100.0,
+    ) -> Polygon:
+        """Generate expansion polygon from 3D hull buffered by ``buffer_pct`` %
+        of the mean side length of the 3D bounding box."""
+        hull = MultiPoint(coords_3d).convex_hull
+        dx = coords_3d[:, 0].max() - coords_3d[:, 0].min()
+        dy = coords_3d[:, 1].max() - coords_3d[:, 1].min()
+        mean_side = (dx + dy) / 2.0
+        buf = mean_side * buffer_pct / 100.0
+        poly = hull.buffer(buf)
+        logger.info(
+            "Auto-generated expansion polygon: buffer={:.0f}m ({}% of {:.0f}m mean side)",
+            buf, buffer_pct, mean_side,
+        )
+        return poly
+
     @classmethod
     def load_polygon(cls, path: str | Path) -> Polygon:
         """Load a polygon from GeoJSON, WKT text file, or Shapefile."""

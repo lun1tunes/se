@@ -43,7 +43,9 @@ class IDWTimeSliceInterpolator(InterpolationStrategy):
     # -- internals -----------------------------------------------------------
 
     def _idw_volume(self, data: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Run IDW on each time-slice."""
+        """Run IDW on all time-slices (fully vectorised)."""
+        import time as _time
+
         n_il, n_xl, n_samp = data.shape
         result = data.copy()
 
@@ -57,31 +59,51 @@ class IDWTimeSliceInterpolator(InterpolationStrategy):
         if len(obs_coords) == 0 or len(miss_coords) == 0:
             return result
 
+        t0 = _time.perf_counter()
+
         tree = cKDTree(obs_coords)
         k_actual = min(self._k, len(obs_coords))
-        dists, idxs = tree.query(miss_coords, k=k_actual)
+        dists, idxs = tree.query(miss_coords, k=k_actual, workers=-1)
 
         # Ensure 2D even for k=1 (cKDTree.query returns 1D when k=1)
         if k_actual == 1:
             dists = dists[:, np.newaxis]
             idxs = idxs[:, np.newaxis]
 
-        # Weights
+        # Weights — (n_miss, k)
         dists = np.clip(dists, 1e-10, None)
         weights = 1.0 / dists ** self._power
         weights /= weights.sum(axis=1, keepdims=True)
 
-        # Observed trace indices (flat into obs arrays)
+        n_miss = len(miss_coords)
+        logger.info(
+            "IDW: interpolating {} missing positions from {} observed ({} samples)",
+            n_miss, len(obs_coords), n_samp,
+        )
+
+        # ── Vectorised: gather observed traces → weighted sum ────────────
+        # obs_traces: (n_obs, n_samp)
         obs_il = obs_coords[:, 0]
         obs_xl = obs_coords[:, 1]
+        obs_traces = data[obs_il, obs_xl, :]          # (n_obs, n_samp)
 
-        logger.info("IDW: interpolating {} missing positions from {} observed", len(miss_coords), len(obs_coords))
+        # Process in chunks to limit peak memory (n_miss × k × n_samp)
+        CHUNK = max(1, min(n_miss, 50_000_000 // max(n_samp * k_actual, 1)))
+        miss_il = miss_coords[:, 0]
+        miss_xl = miss_coords[:, 1]
 
-        for t in range(n_samp):
-            obs_vals = data[obs_il, obs_xl, t]
-            interp_vals = np.sum(weights * obs_vals[idxs], axis=1)
-            result[miss_coords[:, 0], miss_coords[:, 1], t] = interp_vals
+        for start in range(0, n_miss, CHUNK):
+            end = min(start + CHUNK, n_miss)
+            w = weights[start:end]                     # (chunk, k)
+            ix = idxs[start:end]                       # (chunk, k)
+            # neighbour_traces: (chunk, k, n_samp)
+            neighbour_traces = obs_traces[ix]
+            # weighted average: (chunk, n_samp)
+            interp_vals = np.einsum('ij,ijk->ik', w, neighbour_traces)
+            result[miss_il[start:end], miss_xl[start:end], :] = interp_vals
 
+        elapsed = _time.perf_counter() - t0
+        logger.info("IDW completed in {:.2f}s", elapsed)
         return result
 
     @staticmethod

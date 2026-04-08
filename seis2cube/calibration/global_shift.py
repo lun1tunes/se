@@ -121,24 +121,27 @@ class GlobalShiftGainPhase(CalibrationStrategy):
             amp_2d = amp_2d[np.newaxis, :]
         out = amp_2d.copy()
 
-        # 1. Time shift
+        # 1. Time shift (vectorised over all traces)
         shift = p["shift_samples"]
         if shift != 0:
             out = np.roll(out, shift, axis=-1)
 
-        # 2. Gain
-        out = out * p["gain"]
+        # 2. Gain (vectorised)
+        out *= p["gain"]
 
-        # 3. Phase rotation
+        # 3. Phase rotation — batch via scipy.signal.hilbert on full 2D array
         if p["phase_deg"] != 0.0:
-            for i in range(out.shape[0]):
-                out[i] = phase_rotate(out[i], p["phase_deg"])
+            from scipy.signal import hilbert as _hilbert
+            angle_rad = np.deg2rad(p["phase_deg"])
+            analytic = _hilbert(out, axis=-1)
+            out = np.real(analytic * np.exp(1j * angle_rad)).astype(np.float32)
 
-        # 4. Matching filter
+        # 4. Matching filter — batch via fftconvolve (supports N-D)
         if p.get("matching_filter") is not None:
+            from scipy.signal import fftconvolve
             mf = np.array(p["matching_filter"], dtype=np.float32)
-            for i in range(out.shape[0]):
-                out[i] = apply_matching_filter(out[i], mf)
+            # fftconvolve along last axis for each trace
+            out = fftconvolve(out, mf[np.newaxis, :], mode="same", axes=-1).astype(np.float32)
 
         result = out.astype(np.float32)
         return result[0] if was_1d else result

@@ -89,8 +89,12 @@ def cross_correlation_shift(
 
     Returns (shift_samples, cc_max).  Positive shift means trace_a is delayed
     relative to trace_b.
+
+    Uses FFT-based correlation — O(n log n) instead of O(n²).
     """
-    cc = np.correlate(trace_a, trace_b, mode="full")
+    from scipy.signal import fftconvolve
+    # Cross-correlation via fftconvolve (flip b) — O(n log n)
+    cc = fftconvolve(trace_a, trace_b[::-1], mode="full")
     center = len(cc) // 2
     if max_shift_samples is not None:
         lo = max(0, center - max_shift_samples)

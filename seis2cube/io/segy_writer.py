@@ -46,6 +46,7 @@ class SegyWriter3D:
         xl_step_y: float = 0.0,
         coord_scalar: int = -100,
         sample_format: int = 5,
+        delrt_ms: float = 0.0,
     ) -> None:
         self._path = Path(path)
         self._inlines = np.asarray(inlines, dtype=np.int32)
@@ -60,6 +61,7 @@ class SegyWriter3D:
         self._xl_step_y = xl_step_y
         self._coord_scalar = coord_scalar
         self._sample_format = sample_format
+        self._delrt_ms = delrt_ms
 
     def write(self, volume: np.ndarray) -> Path:
         """Write *volume* shaped (n_iline, n_xline, n_samples) to SEG-Y.
@@ -86,12 +88,26 @@ class SegyWriter3D:
             self._path.name, n_il, n_xl, n_samp,
         )
 
+        import time as _time
+
+        # Pre-compute all scaled coordinates (vectorised)
+        ii = np.arange(n_il, dtype=np.float64)
+        xi = np.arange(n_xl, dtype=np.float64)
+        ii_grid, xi_grid = np.meshgrid(ii, xi, indexing="ij")
+        wx_all = self._origin_x + ii_grid * self._il_step_x + xi_grid * self._xl_step_x
+        wy_all = self._origin_y + ii_grid * self._il_step_y + xi_grid * self._xl_step_y
+        sx_all, sy_all = self._scale_coords_array(wx_all.ravel(), wy_all.ravel())
+
+        total_traces = n_il * n_xl
+        log_every = max(1, total_traces // 10)
+        t0 = _time.perf_counter()
+
         with segyio.create(str(self._path), spec) as f:
             # Binary header
             f.bin[segyio.BinField.Interval] = self._dt_us
             f.bin[segyio.BinField.Samples] = n_samp
             f.bin[segyio.BinField.Format] = self._sample_format
-            f.bin[segyio.BinField.Traces] = n_il * n_xl
+            f.bin[segyio.BinField.Traces] = total_traces
 
             trace_idx = 0
             for i_idx, il in enumerate(self._inlines):
@@ -102,21 +118,26 @@ class SegyWriter3D:
                     h[self._hb.inline] = int(il)
                     h[self._hb.xline] = int(xl)
 
-                    # Compute world coordinates
-                    wx = self._origin_x + i_idx * self._il_step_x + x_idx * self._xl_step_x
-                    wy = self._origin_y + i_idx * self._il_step_y + x_idx * self._xl_step_y
-
-                    # Apply scalar for storage
-                    sx, sy = self._scale_coords(wx, wy)
                     h[segyio.TraceField.SourceGroupScalar] = self._coord_scalar
-                    h[segyio.TraceField.CDP_X] = sx
-                    h[segyio.TraceField.CDP_Y] = sy
-                    h[segyio.TraceField.SourceX] = sx
-                    h[segyio.TraceField.SourceY] = sy
+                    h[segyio.TraceField.CDP_X] = int(sx_all[trace_idx])
+                    h[segyio.TraceField.CDP_Y] = int(sy_all[trace_idx])
+                    h[segyio.TraceField.SourceX] = int(sx_all[trace_idx])
+                    h[segyio.TraceField.SourceY] = int(sy_all[trace_idx])
+                    h[segyio.TraceField.DelayRecordingTime] = int(self._delrt_ms)
 
                     trace_idx += 1
 
-        logger.info("SEG-Y written: {}", self._path)
+                if (trace_idx) % log_every < n_xl:
+                    elapsed = _time.perf_counter() - t0
+                    pct = 100 * trace_idx / total_traces
+                    logger.info(
+                        "Writing SEG-Y: {}/{} traces ({:.0f}%), {:.1f}s elapsed",
+                        trace_idx, total_traces, pct, elapsed,
+                    )
+
+        elapsed = _time.perf_counter() - t0
+        size_mb = self._path.stat().st_size / (1024 * 1024)
+        logger.info("SEG-Y written: {} ({:.1f} MB in {:.2f}s)", self._path.name, size_mb, elapsed)
         return self._path
 
     @staticmethod
@@ -145,3 +166,14 @@ class SegyWriter3D:
             return int(round(x * factor)), int(round(y * factor))
         else:
             return int(round(x / s)), int(round(y / s))
+
+    def _scale_coords_array(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Vectorised coordinate scaling for batch header writing."""
+        s = self._coord_scalar
+        if s == 0:
+            s = 1
+        if s < 0:
+            factor = abs(s)
+            return np.rint(x * factor).astype(np.int64), np.rint(y * factor).astype(np.int64)
+        else:
+            return np.rint(x / s).astype(np.int64), np.rint(y / s).astype(np.int64)
