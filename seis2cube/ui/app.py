@@ -37,6 +37,7 @@ from seis2cube.ui.components import (
     PALETTE,
     SEISMIC_COLORSCALE,
     plot_convergence,
+    plot_crossline_section,
     plot_inline_section,
     plot_map_with_lines,
     plot_metrics_radar,
@@ -94,6 +95,7 @@ st.markdown(
         background-color: {PALETTE['bg_card']};
         border: 1px solid #313244;
         border-radius: 12px;
+        overflow: hidden;
     }}
     div[data-testid="stExpander"] p,
     div[data-testid="stExpander"] span,
@@ -101,9 +103,23 @@ st.markdown(
     div[data-testid="stExpander"] summary,
     div[data-testid="stExpander"] [data-testid="stMarkdownContainer"] {{
         color: {PALETTE['text']} !important;
+        line-height: 1.5 !important;
     }}
-    div[data-testid="stExpander"] summary > span {{
-        padding-left: 4px;
+    div[data-testid="stExpander"] summary {{
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+    }}
+    div[data-testid="stExpander"] summary > span:first-child {{
+        margin: 0 !important;
+        padding: 0 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+    }}
+    div[data-testid="stExpander"] summary p {{
+        margin: 0 !important;
+        padding: 0 !important;
+        display: inline !important;
     }}
     div[data-testid="stExpander"] code {{
         color: {PALETTE['primary']} !important;
@@ -503,6 +519,7 @@ def _run_pipeline() -> None:
         sim_mask = runner._create_simulation_mask(orig_mask, sparse.mask, inlines_3d, xlines_3d, target_grid)
         sim_metrics = interpolator.fit(orig_in_grid, sim_mask)
         st.session_state.interp_sim_metrics = sim_metrics
+        st.session_state.interp_sim_mask = sim_mask  # Save for scatter plot after reconstruction
 
         # 10. Reconstruct
         _progress(9, PipelineStage.RECONSTRUCTING)
@@ -518,6 +535,29 @@ def _run_pipeline() -> None:
         result = interpolator.reconstruct(combined_sparse)
         del combined_sparse; gc.collect()
         st.session_state.recon_volume = result.volume
+
+        # Save scatter plot data: true vs interpolated values from simulation
+        sim_mask = st.session_state.interp_sim_mask
+        if sim_mask is not None and orig_in_grid is not None:
+            sim_positions = np.argwhere(sim_mask & ~orig_mask)  # Interpolated positions in simulation
+            if len(sim_positions) > 0:
+                # Sample up to 3000 points for performance
+                n_samples = min(len(sim_positions), 3000)
+                rng = np.random.default_rng(42)
+                sample_idx = rng.choice(len(sim_positions), n_samples, replace=False)
+                sampled_pos = sim_positions[sample_idx]
+
+                # Collect true (from orig_in_grid) and predicted (from result.volume) amplitudes
+                true_vals, pred_vals = [], []
+                for il_idx, xl_idx in sampled_pos:
+                    true_trace = orig_in_grid[il_idx, xl_idx, :]
+                    pred_trace = result.volume[il_idx, xl_idx, :]
+                    # Use RMS amplitude for scatter plot (one point per trace)
+                    true_vals.append(np.sqrt(np.mean(true_trace**2)))
+                    pred_vals.append(np.sqrt(np.mean(pred_trace**2)))
+
+                st.session_state.interp_scatter_true = np.array(true_vals)
+                st.session_state.interp_scatter_pred = np.array(pred_vals)
 
         # 11. Assemble
         _progress(10, PipelineStage.ASSEMBLING)
@@ -651,7 +691,7 @@ with tab_dash:
     # Config summary
     if st.session_state.config_obj is not None:
         cfg = st.session_state.config_obj
-        with st.expander("⚙️ Active Configuration", expanded=False):
+        with st.expander("Active Configuration", expanded=False):
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown(f"**3D Cube:** `{cfg.cube3d_path.name}`")
@@ -712,7 +752,7 @@ with tab_data:
                 getattr(st.session_state, "line_names", []),
                 polygon_xy=poly_coords,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -728,13 +768,30 @@ with tab_cal:
     if before is None or after is None:
         st.info("Run the pipeline to see calibration results.")
     else:
-        # Split info
+        # ── What is Calibration? ────────────────────────────────────────
+        st.markdown("### What is Calibration?")
+        st.info("""
+        **Calibration** matches 2D seismic amplitudes to 3D reference data in the overlap zone.
+
+        2D profiles often have different amplitude scaling, time shifts, and phase compared to 3D cubes.
+        The calibrator learns these differences from **training pairs** (overlap zone data) and corrects
+        all 2D traces. Quality is measured on **test pairs** (held-out data not used for training).
+        """)
+
+        # Split info with visual indicator
         n_train = getattr(st.session_state, "n_train", "?")
         n_test = getattr(st.session_state, "n_test", "?")
-        st.caption(
-            f"📊 Train: **{n_train}** pairs · Test (holdout): **{n_test}** pairs · "
-            f"All metrics and plots below are on the **test set** (data NOT used for fitting)"
-        )
+
+        col_info1, col_info2, col_info3 = st.columns(3)
+        with col_info1:
+            st.metric("Training Pairs", n_train, help="Used to fit the calibration model")
+        with col_info2:
+            st.metric("Test Pairs (holdout)", n_test, help="Used to evaluate calibration quality (unseen during training)")
+        with col_info3:
+            st.metric("Holdout Strategy", "Spatial split", help="Last segment of overlap zone held out as test set")
+
+        st.caption("All metrics and plots below are computed on the **test set** (unseen during calibration fitting)")
+        st.markdown("<br>", unsafe_allow_html=True)
 
         # Before / after metrics
         st.markdown("### Before vs After Calibration")
@@ -818,7 +875,7 @@ with tab_cal:
                     showarrow=False, font=dict(size=13, color=PALETTE["text"]),
                 )],
             )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            st.plotly_chart(fig_scatter, width='stretch')
 
             # Strip plot: distribution of correlations
             st.markdown("### Correlation Distribution")
@@ -842,7 +899,7 @@ with tab_cal:
                 plot_bgcolor=PALETTE["bg_dark"],
                 showlegend=False,
             )
-            st.plotly_chart(fig_strip, use_container_width=True)
+            st.plotly_chart(fig_strip, width='stretch')
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -873,12 +930,82 @@ with tab_cal:
             delrt = st.session_state.meta_3d.get("delrt_ms", 0.0) if st.session_state.meta_3d else 0.0
             time_ax = delrt + np.arange(len(traces_2d[trace_idx])) * dt
 
+            # ── Amplitude scatter: 2D vs 3D before/after ─────────────────────
+            st.markdown("#### Amplitude Alignment: 2D vs 3D")
+            st.caption("How well do 2D amplitudes match 3D? Perfect alignment = points on diagonal line")
+
+            col_scat1, col_scat2 = st.columns(2)
+            with col_scat1:
+                # Before calibration scatter
+                fig_scat_before = go.Figure()
+                t2d = traces_2d[trace_idx]
+                t3d = traces_3d[trace_idx]
+                # Subsample for visualization if too many points
+                n_points = len(t2d)
+                step = max(1, n_points // 500)
+                fig_scat_before.add_trace(go.Scatter(
+                    x=t3d[::step], y=t2d[::step],
+                    mode='markers',
+                    marker=dict(size=3, color="#f38ba8", opacity=0.6),
+                    name='Before calibration'
+                ))
+                # Add diagonal reference line
+                min_val = min(t2d.min(), t3d.min())
+                max_val = max(t2d.max(), t3d.max())
+                fig_scat_before.add_trace(go.Scatter(
+                    x=[min_val, max_val], y=[min_val, max_val],
+                    mode='lines', line=dict(color='grey', dash='dash', width=1),
+                    name='Perfect match', showlegend=False
+                ))
+                fig_scat_before.update_layout(
+                    title="BEFORE Calibration",
+                    xaxis_title="3D Amplitude (reference)",
+                    yaxis_title="2D Amplitude",
+                    height=350,
+                    template="plotly_dark",
+                    paper_bgcolor=PALETTE["bg_card"],
+                    plot_bgcolor=PALETTE["bg_dark"],
+                    font=dict(color=PALETTE["text"]),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_scat_before, width='stretch')
+
+            with col_scat2:
+                # After calibration scatter
+                fig_scat_after = go.Figure()
+                tcorr = traces_corr[trace_idx]
+                fig_scat_after.add_trace(go.Scatter(
+                    x=t3d[::step], y=tcorr[::step],
+                    mode='markers',
+                    marker=dict(size=3, color=PALETTE["primary"], opacity=0.6),
+                    name='After calibration'
+                ))
+                fig_scat_after.add_trace(go.Scatter(
+                    x=[min_val, max_val], y=[min_val, max_val],
+                    mode='lines', line=dict(color='grey', dash='dash', width=1),
+                    name='Perfect match', showlegend=False
+                ))
+                fig_scat_after.update_layout(
+                    title="AFTER Calibration",
+                    xaxis_title="3D Amplitude (reference)",
+                    yaxis_title="Calibrated 2D Amplitude",
+                    height=350,
+                    template="plotly_dark",
+                    paper_bgcolor=PALETTE["bg_card"],
+                    plot_bgcolor=PALETTE["bg_dark"],
+                    font=dict(color=PALETTE["text"]),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_scat_after, width='stretch')
+
+            # ── Waveform comparison ───────────────────────────────────────
+            st.markdown("#### Waveform Comparison")
             fig = plot_trace_comparison(
                 traces_2d[trace_idx], traces_3d[trace_idx], traces_corr[trace_idx],
                 time_axis=time_ax,
                 title=f"Test Pair #{trace_idx + 1} — 2D vs 3D vs Corrected",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
             # Spectrum comparison
             from seis2cube.utils.spectral import amplitude_spectrum
@@ -888,7 +1015,7 @@ with tab_cal:
 
             fig_sp = plot_spectrum_comparison(freqs, sp2d, sp3d, spcorr,
                                              title=f"Spectrum — Test Pair #{trace_idx + 1}")
-            st.plotly_chart(fig_sp, use_container_width=True)
+            st.plotly_chart(fig_sp, width='stretch')
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -899,91 +1026,177 @@ with tab_interp:
     section_header("Interpolation Results", "🧩")
 
     sim = st.session_state.interp_sim_metrics
+    cfg_interp = st.session_state.config_obj.interpolation if st.session_state.config_obj else None
 
     if sim is None:
         st.info("Run the pipeline to see interpolation results.")
     else:
         import plotly.graph_objects as go
 
-        # ── Explanation ──────────────────────────────────────────────
-        st.markdown("""
-**Как оценивается качество интерполяции?**
+        # ── Method Explanation ─────────────────────────────────────────────
+        st.markdown("### What is Interpolation?")
+        st.info("""
+        **Interpolation** fills the gaps between 2D seismic profiles to create a complete 3D volume.
 
-Внутри зоны оригинального 3D куба мы знаем истинные значения. Pipeline «прячет» часть трасс,
-восстанавливает их интерполятором, и сравнивает с оригиналом. Это **симуляция** — она
-показывает, насколько хорошо интерполятор заполняет пробелы, когда у него есть только
-разреженные 2D профили.
+        The algorithm estimates seismic amplitudes at positions where no data was acquired,
+        using the calibrated 2D traces as known reference points. The quality of this reconstruction
+        is validated by hiding known 3D data and measuring how well the interpolator recovers it.
         """)
 
-        # ── Grid overview ────────────────────────────────────────────
+        # ── Method Description ────────────────────────────────────────────
+        st.markdown("### Selected Interpolation Method")
+
+        method_descriptions = {
+            "idw": {
+                "name": "Inverse Distance Weighting (IDW)",
+                "icon": "📐",
+                "description": """
+                **How it works:** Each interpolated point is a weighted average of nearby known traces.
+                Closer traces have more influence. Fast and simple, but may produce smoother results.
+                **Best for:** Quick reconstructions, uniformly spaced 2D lines.
+                """,
+                "params": ["Power (decay rate)", "Max neighbors"],
+            },
+            "pocs": {
+                "name": "POCS / FPOCS (Projections onto Convex Sets)",
+                "icon": "🔄",
+                "description": """
+                **How it works:** Iterative algorithm that enforces data consistency in both
+                spatial and frequency domains. Uses FFT/wavelet transforms and thresholding.
+                **Best for:** Complex geology with predictable spectral characteristics.
+                """,
+                "params": ["Iterations", "Transform (FFT/Wavelet)", "Fast mode"],
+            },
+            "mssa": {
+                "name": "MSSA (Multichannel Singular Spectrum Analysis)",
+                "icon": "📊",
+                "description": """
+                **How it works:** Exploits low-rank structure in seismic data via Hankel matrix decomposition.
+                Captures dominant signal patterns and suppresses noise during reconstruction.
+                **Best for:** Data with strong coherent signal patterns, noisy acquisitions.
+                """,
+                "params": ["Rank (signal components)", "Window length"],
+            },
+        }
+
+        method_key = cfg_interp.method.value if cfg_interp else "idw"
+        method_info = method_descriptions.get(method_key, method_descriptions["idw"])
+
+        # Method card with clean vertical layout
+        with st.expander(f"{method_info['icon']} {method_info['name']}", expanded=True):
+            st.markdown(f"**Method code:** `{method_key}`")
+            st.markdown(method_info["description"])
+            if cfg_interp:
+                st.markdown("---")
+                st.markdown("**Configuration Parameters:**")
+                if method_key == "idw":
+                    st.markdown(f"- IDW Power: `{cfg_interp.idw_power}` (decay rate)")
+                    st.markdown(f"- Max Neighbors: `{cfg_interp.idw_max_neighbours}` traces")
+                elif method_key == "pocs":
+                    st.markdown(f"- Iterations: `{cfg_interp.pocs_niter}`")
+                    st.markdown(f"- Transform: `{cfg_interp.pocs_transform.value}`")
+                    st.markdown(f"- Fast Mode: `{cfg_interp.pocs_fast}`")
+                    st.markdown(f"- Threshold Schedule: `{cfg_interp.pocs_threshold_schedule}`")
+                elif method_key == "mssa":
+                    st.markdown(f"- Rank: `{cfg_interp.mssa_rank}` (signal components)")
+                    st.markdown(f"- Window: `{cfg_interp.mssa_window}` samples")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Grid Overview ────────────────────────────────────────────────
         grid = st.session_state.target_grid
         orig_mask = st.session_state.orig_mask
         sparse_mask = getattr(st.session_state, "sparse_mask", None)
 
         if grid is not None:
-            st.markdown("### Расширенный грид")
+            st.markdown("### Extended Grid Coverage")
+            st.caption("Distribution of data sources in the extended 3D volume")
+
             n_total = grid.n_il * grid.n_xl
             n_orig = int(orig_mask.sum()) if orig_mask is not None else 0
-            n_2d = int(sparse_mask.sum()) if sparse_mask is not None else 0
             n_ext_2d = int((sparse_mask & ~orig_mask).sum()) if sparse_mask is not None and orig_mask is not None else 0
             n_empty = n_total - n_orig - n_ext_2d
             pct_orig = 100 * n_orig / max(n_total, 1)
             pct_2d = 100 * n_ext_2d / max(n_total, 1)
             pct_empty = 100 * n_empty / max(n_total, 1)
 
+            # Visual progress bar showing data distribution
+            st.markdown("#### Data Source Distribution")
+            # Ensure minimum width of 1 for each column to prevent st.columns error
+            col_widths = [max(1, int(pct_orig)), max(1, int(pct_2d)), max(1, int(pct_empty))]
+            bar_col1, bar_col2, bar_col3 = st.columns(col_widths)
+            with bar_col1:
+                st.markdown(f"<div style='background:{PALETTE['primary']};height:20px;border-radius:4px;'></div>",
+                           unsafe_allow_html=True)
+            with bar_col2:
+                st.markdown(f"<div style='background:#a6e3a1;height:20px;border-radius:4px;'></div>",
+                           unsafe_allow_html=True)
+            with bar_col3:
+                st.markdown(f"<div style='background:#45475a;height:20px;border-radius:4px;'></div>",
+                           unsafe_allow_html=True)
+
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                render_metric_card("Grid Size", f"{grid.n_il} × {grid.n_xl}", icon="�️")
+                render_metric_card("Total Grid", f"{grid.n_il} × {grid.n_xl}", icon="🗂️")
             with c2:
-                render_metric_card("3D Original", f"{n_orig:,} ({pct_orig:.1f}%)", icon="�")
+                render_metric_card("3D Original", f"{n_orig:,} ({pct_orig:.1f}%)", icon="🔷")
             with c3:
-                render_metric_card("2D Profiles", f"{n_ext_2d:,} ({pct_2d:.1f}%)", icon="📏")
+                render_metric_card("2D Calibrated", f"{n_ext_2d:,} ({pct_2d:.1f}%)", icon="📏")
             with c4:
-                render_metric_card("To Interpolate", f"{n_empty:,} ({pct_empty:.1f}%)", icon="🧩")
+                render_metric_card("Interpolated", f"{n_empty:,} ({pct_empty:.1f}%)", icon="✨")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── Simulation quality metrics ───────────────────────────────
-        st.markdown("### Качество реконструкции (симуляция)")
-        st.caption(
-            "Метрики рассчитаны на тех позициях внутри 3D куба, где данные были «спрятаны» "
-            "и восстановлены интерполятором. Чем ниже RMSE/MAE и выше корреляция — тем лучше."
-        )
+        # ── Simulation Quality Metrics ────────────────────────────────────
+        st.markdown("### Reconstruction Quality (Simulation)")
+        st.info("""
+        **How we measure quality:** Inside the original 3D area, we hide some traces and let the
+        interpolator reconstruct them. Then we compare the reconstructed traces with the actual data.
+        This "simulation" shows how well the method works before applying it to the unknown extension area.
+        """)
+
+        # Quality interpretation
+        corr_val = sim.get("pearson_corr", 0)
+        rmse_val = sim.get("rmse", 0)
+
+        if corr_val > 0.8:
+            quality_level = ("🟢 Excellent", "Correlation > 0.8: High-quality reconstruction expected")
+        elif corr_val > 0.5:
+            quality_level = ("🟡 Good", "Correlation 0.5-0.8: Acceptable quality with some artifacts")
+        else:
+            quality_level = ("🔴 Fair", "Correlation < 0.5: May need more 2D profiles or different method")
+
+        st.markdown(f"**Overall Quality:** {quality_level[0]} — *{quality_level[1]}*")
 
         c1, c2, c3 = st.columns(3)
         with c1:
             render_metric_card(
                 "RMSE",
-                f"{sim['rmse']:.1f}",
+                f"{rmse_val:.2f}",
                 icon="📐",
-                delta="среднеквадр. ошибка",
+                delta="lower is better",
             )
         with c2:
             render_metric_card(
                 "MAE",
-                f"{sim['mae']:.1f}",
+                f"{sim.get('mae', 0):.2f}",
                 icon="📏",
-                delta="средняя абс. ошибка",
+                delta="mean absolute error",
             )
         with c3:
-            corr_val = sim["pearson_corr"]
-            quality = "отлично" if corr_val > 0.8 else "хорошо" if corr_val > 0.5 else "слабо"
             render_metric_card(
-                "Корреляция",
-                f"{corr_val:.4f}",
+                "Correlation",
+                f"{corr_val:.3f}",
                 icon="🎯",
-                delta=quality,
+                delta=f"quality: {quality_level[0].split()[1]}",
             )
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── Coverage map: 3-colour heatmap ───────────────────────────
+        # ── Coverage Visualization ────────────────────────────────────────
         if orig_mask is not None:
-            st.markdown("### Карта покрытия")
-            st.caption(
-                "🟦 Синий = оригинальный 3D куб · 🟩 Зелёный = 2D профили · "
-                "⬛ Тёмный = пусто (заполнено интерполяцией)"
-            )
+            st.markdown("### Data Coverage Map")
+            st.caption("Visual representation of data sources: Blue = 3D, Green = 2D, Dark = Interpolated")
 
             # Build 3-value map: 0=empty, 1=2D-only, 2=original-3D
             coverage = np.zeros_like(orig_mask, dtype=np.float32)
@@ -992,50 +1205,166 @@ with tab_interp:
                 coverage[ext_2d] = 1.0
             coverage[orig_mask] = 2.0
 
+            # Get actual IL/XL labels for hover
+            il_labels = grid.inlines if grid else np.arange(coverage.shape[0])
+            xl_labels = grid.xlines if grid else np.arange(coverage.shape[1])
+
             fig_cov = go.Figure(data=go.Heatmap(
                 z=coverage,
+                x=xl_labels,
+                y=il_labels,
                 colorscale=[
-                    [0.0, PALETTE["bg_dark"]],
-                    [0.5, "#a6e3a1"],
-                    [1.0, PALETTE["primary"]],
+                    [0.0, "#313244"],  # Empty: dark gray
+                    [0.5, "#a6e3a1"],  # 2D profiles: light green
+                    [1.0, PALETTE["primary"]],  # 3D: indigo
                 ],
                 zmin=0, zmax=2,
                 showscale=False,
-                hovertemplate="IL idx: %{y}<br>XL idx: %{x}<br>Type: %{z}<extra></extra>",
+                hovertemplate=(
+                    "<b>Inline:</b> %{y}<br>"
+                    "<b>Crossline:</b> %{x}<br>"
+                    "<b>Source:</b> " +
+                    "%{z:,.0f}<extra></extra>"
+                ),
             ))
+
+            # Add custom hover labels
+            hover_text = []
+            for i in range(coverage.shape[0]):
+                row = []
+                for j in range(coverage.shape[1]):
+                    val = coverage[i, j]
+                    source = "Original 3D" if val == 2 else ("2D Profile" if val == 1 else "Interpolated")
+                    row.append(f"IL: {il_labels[i]}<br>XL: {xl_labels[j]}<br>Source: {source}")
+                hover_text.append(row)
+
+            fig_cov.update_traces(text=hover_text, hovertemplate="%{text}<extra></extra>")
             fig_cov.update_layout(
-                height=450,
+                height=500,
                 paper_bgcolor=PALETTE["bg_dark"],
                 plot_bgcolor=PALETTE["bg_dark"],
                 font=dict(color=PALETTE["text"]),
-                xaxis_title="Crossline index",
-                yaxis_title="Inline index",
-                yaxis=dict(autorange="reversed"),
-                margin=dict(l=60, r=20, t=30, b=50),
+                xaxis_title="Crossline",
+                yaxis_title="Inline",
+                yaxis=dict(autorange="reversed", scaleanchor="x"),
+                xaxis=dict(constrain="domain"),
+                margin=dict(l=70, r=20, t=30, b=50),
             )
-            st.plotly_chart(fig_cov, use_container_width=True)
+            st.plotly_chart(fig_cov, width='stretch')
 
-            # ── Fill ratio pie chart ─────────────────────────────────
-            st.markdown("### Соотношение данных")
-            labels = ["3D Original", "2D Profiles", "Interpolated"]
-            values = [n_orig, n_ext_2d, n_empty]
-            colors_pie = [PALETTE["primary"], "#a6e3a1", "#45475a"]
+            # Legend
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.markdown(f"<span style='color:{PALETTE['primary']}'>🔷</span> **3D Original** ({pct_orig:.1f}%)",
+                           unsafe_allow_html=True)
+            with col2:
+                st.markdown(f"<span style='color:#a6e3a1'>📏</span> **2D Profiles** ({pct_2d:.1f}%)",
+                           unsafe_allow_html=True)
+            with col3:
+                st.markdown(f"<span style='color:#45475a'>✨</span> **Interpolated** ({pct_empty:.1f}%)",
+                           unsafe_allow_html=True)
+            with col4:
+                st.markdown(f"📊 **Total Traces:** {n_total:,}")
 
-            fig_pie = go.Figure(data=go.Pie(
-                labels=labels, values=values,
-                marker=dict(colors=colors_pie),
-                textinfo="label+percent",
-                textfont=dict(size=13, color="white"),
-                hole=0.4,
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Scatter Plot: True vs Interpolated ───────────────────────────
+        st.markdown("### True vs Interpolated Amplitudes")
+        st.caption("How well does the interpolation reconstruct hidden 3D data? Points on diagonal = perfect reconstruction")
+
+        scatter_true = getattr(st.session_state, "interp_scatter_true", None)
+        scatter_pred = getattr(st.session_state, "interp_scatter_pred", None)
+
+        if scatter_true is not None and scatter_pred is not None and len(scatter_true) > 0:
+            fig_interp_scatter = go.Figure()
+
+            # Main scatter
+            fig_interp_scatter.add_trace(go.Scatter(
+                x=scatter_true, y=scatter_pred,
+                mode='markers',
+                marker=dict(
+                    size=5, color=PALETTE["primary"], opacity=0.5,
+                    line=dict(width=0.5, color="white")
+                ),
+                name='Interpolated vs True',
             ))
-            fig_pie.update_layout(
-                height=350,
-                paper_bgcolor=PALETTE["bg_card"],
-                font=dict(color=PALETTE["text"]),
+
+            # Diagonal reference line (perfect match)
+            min_val = min(scatter_true.min(), scatter_pred.min())
+            max_val = max(scatter_true.max(), scatter_pred.max())
+            fig_interp_scatter.add_trace(go.Scatter(
+                x=[min_val, max_val], y=[min_val, max_val],
+                mode='lines',
+                line=dict(color='#f38ba8', dash='dash', width=2),
+                name='Perfect match (y=x)',
+            ))
+
+            # ±20% error band
+            fig_interp_scatter.add_trace(go.Scatter(
+                x=[min_val, max_val],
+                y=[min_val * 1.2, max_val * 1.2],
+                mode='lines', line=dict(color='grey', dash='dot', width=1),
+                name='+20% error',
                 showlegend=False,
-                margin=dict(l=20, r=20, t=20, b=20),
+            ))
+            fig_interp_scatter.add_trace(go.Scatter(
+                x=[min_val, max_val],
+                y=[min_val * 0.8, max_val * 0.8],
+                mode='lines', line=dict(color='grey', dash='dot', width=1),
+                name='-20% error',
+                showlegend=False,
+            ))
+
+            fig_interp_scatter.update_layout(
+                title=f"Interpolation Quality (n={len(scatter_true)} traces)",
+                xaxis_title="True 3D Amplitude (RMS)",
+                yaxis_title="Interpolated Amplitude (RMS)",
+                height=450,
+                template="plotly_dark",
+                paper_bgcolor=PALETTE["bg_card"],
+                plot_bgcolor=PALETTE["bg_dark"],
+                font=dict(color=PALETTE["text"]),
+                xaxis=dict(scaleanchor="y", scaleratio=1),  # Equal axes
+                yaxis=dict(scaleanchor="x", scaleratio=1),
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+                ),
             )
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_interp_scatter, width='stretch')
+
+            # Statistics
+            col_stat1, col_stat2, col_stat3 = st.columns(3)
+            with col_stat1:
+                mae_amp = np.mean(np.abs(scatter_pred - scatter_true))
+                st.metric("Mean Abs Error (amp)", f"{mae_amp:.3f}")
+            with col_stat2:
+                bias = np.mean(scatter_pred - scatter_true)
+                st.metric("Bias (pred - true)", f"{bias:.3f}",
+                         delta="overestimates" if bias > 0 else "underestimates")
+            with col_stat3:
+                within_20pct = 100 * np.mean(
+                    (scatter_pred >= 0.8 * scatter_true) & (scatter_pred <= 1.2 * scatter_true)
+                )
+                st.metric("Within ±20%", f"{within_20pct:.1f}%")
+        else:
+            st.info("Scatter plot data not available. Run pipeline to generate comparison.")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Recommendations ───────────────────────────────────────────────
+        with st.expander("💡 Recommendations for Better Results", expanded=False):
+            st.markdown("""
+            **To improve interpolation quality:**
+
+            1. **Add more 2D profiles** — More calibrated traces = better spatial sampling
+            2. **Space profiles evenly** — Uniform coverage reduces artifacts
+            3. **Extend overlap zone** — Larger calibration area = more accurate matching
+            4. **Try different methods:**
+               - Use **POCS** for complex geology with predictable patterns
+               - Use **MSSA** for noisy data with coherent signal
+               - Use **IDW** for quick, robust reconstructions
+            5. **Adjust buffer size** — Smaller expansion needs less interpolation
+            """)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1047,98 +1376,216 @@ with tab_viewer:
 
     vol = st.session_state.final_volume
     orig_vol = st.session_state.cube_volume
+    grid = st.session_state.target_grid
 
     if vol is None:
         st.info("Run the pipeline to view volumes.")
     else:
-        grid = st.session_state.target_grid
+        # ── Survey Map with 2D lines and 3D boundary ──────────────────────
+        st.markdown("### Survey Map with 2D Profiles & 3D Boundary")
+        st.caption("Interactive map showing original 3D area (blue), expansion zone (orange dashed), and 2D profiles")
+
+        poly_coords = None
+        try:
+            cfg = st.session_state.config_obj
+            if cfg and cfg.expand_polygon_path:
+                from seis2cube.geometry.overlap_detector import OverlapDetector
+                poly = OverlapDetector.load_polygon(cfg.expand_polygon_path)
+                poly_coords = np.array(poly.exterior.coords)
+            elif hasattr(st.session_state, 'expand_poly'):
+                poly_coords = st.session_state.expand_poly
+        except Exception:
+            pass
+
+        # Create enhanced map with 2D traces, 3D boundary, and expansion polygon
+        fig_map = plot_map_with_lines(
+            st.session_state.coords_3d,
+            getattr(st.session_state, "lines_coords", []),
+            getattr(st.session_state, "line_names", []),
+            polygon_xy=poly_coords,
+            show_3d_boundary=True,
+            inlines_3d=st.session_state.inlines_3d,
+            xlines_3d=st.session_state.xlines_3d,
+            grid=grid,
+            show_extended_grid=True,
+            title="Survey Geometry: 3D Area + 2D Profiles + Expansion Zone",
+            height=500,
+        )
+        st.plotly_chart(fig_map, width='stretch')
+
+        # Map legend explanation
+        st.markdown("""
+        **Map Legend:**
+        - 🔷 **Blue solid** = Original 3D cube area (source of calibration reference)
+        - ⬜ **Gray dashed** = Extended grid area (target for reconstruction)
+        - 📏 **Colored lines** = 2D seismic profiles (input data for extension)
+        - 🟠 **Orange dotted** = Expansion polygon (optional custom boundary)
+
+        **Axes:** Equal scale (1:1) — 1 meter on X = 1 meter on Y
+        """)
+
+        st.divider()
+
+        # ── Section Viewers ───────────────────────────────────────────────
+        st.markdown("### Seismic Sections")
 
         view_mode = st.radio(
-            "View",
-            ["Time Slice", "Inline Section", "Crossline Section"],
+            "View Mode",
+            ["Time Slice (IL × XL)", "Inline Section (XL × Time)", "Crossline Section (IL × Time)"],
             horizontal=True,
             key="viewer_mode",
+            help="Time Slice = map view at fixed time. Inline/Crossline = vertical sections through the cube",
         )
 
         volume_sel = st.radio(
-            "Volume",
-            ["Final (extended)", "Original 3D", "Side by Side"],
+            "Volume to Display",
+            ["Final (extended)", "Original 3D", "Side by Side Comparison"],
             horizontal=True,
             key="viewer_vol",
         )
 
-        if view_mode == "Time Slice":
-            max_samp = vol.shape[2] - 1
-            t_idx = st.slider("Sample index", 0, max_samp, max_samp // 3, key="ts_slider")
-            _delrt = st.session_state.meta_3d.get("delrt_ms", 0.0) if st.session_state.meta_3d else 0.0
-            t_ms = _delrt + t_idx * (grid.dt_ms if grid else 2.0)
-            st.caption(f"Time: {t_ms:.1f} ms")
+        _delrt = st.session_state.meta_3d.get("delrt_ms", 0.0) if st.session_state.meta_3d else 0.0
 
-            if volume_sel == "Side by Side" and orig_vol is not None:
+        if view_mode == "Time Slice (IL × XL)":
+            max_samp = vol.shape[2] - 1
+            t_idx = st.slider(
+                "Time Sample Index",
+                0, max_samp, max_samp // 3,
+                key="ts_slider",
+                help="Select time slice to view (0 = earliest time)",
+            )
+            t_ms = _delrt + t_idx * (grid.dt_ms if grid else 2.0)
+            st.caption(f"**Time: {t_ms:.1f} ms** | Sample {t_idx} of {max_samp}")
+
+            if volume_sel == "Side by Side Comparison" and orig_vol is not None:
                 c1, c2 = st.columns(2)
                 with c1:
-                    fig_o = plot_time_slice(orig_vol, t_idx, title="Original 3D", height=400)
-                    st.plotly_chart(fig_o, use_container_width=True)
+                    fig_o = plot_time_slice(
+                        orig_vol, t_idx,
+                        inlines=st.session_state.inlines_3d,
+                        xlines=st.session_state.xlines_3d,
+                        title=f"Original 3D — t={t_ms:.1f} ms",
+                        height=450,
+                    )
+                    st.plotly_chart(fig_o, width='stretch')
                 with c2:
-                    fig_f = plot_time_slice(vol, t_idx,
-                                           inlines=grid.inlines if grid else None,
-                                           xlines=grid.xlines if grid else None,
-                                           title="Extended", height=400)
-                    st.plotly_chart(fig_f, use_container_width=True)
+                    fig_f = plot_time_slice(
+                        vol, t_idx,
+                        inlines=grid.inlines if grid else None,
+                        xlines=grid.xlines if grid else None,
+                        title=f"Extended Cube — t={t_ms:.1f} ms",
+                        height=450,
+                    )
+                    st.plotly_chart(fig_f, width='stretch')
             else:
                 show_vol = vol if "Final" in volume_sel else (orig_vol if orig_vol is not None else vol)
                 label = "Extended" if "Final" in volume_sel else "Original"
-                fig = plot_time_slice(show_vol, t_idx, title=f"{label} — t={t_ms:.1f} ms")
-                st.plotly_chart(fig, use_container_width=True)
+                fig = plot_time_slice(
+                    show_vol, t_idx,
+                    inlines=grid.inlines if grid else None,
+                    xlines=grid.xlines if grid else None,
+                    title=f"{label} — Time Slice at t={t_ms:.1f} ms",
+                    height=500,
+                )
+                st.plotly_chart(fig, width='stretch')
 
-        elif view_mode == "Inline Section":
+        elif view_mode == "Inline Section (XL × Time)":
             max_il = vol.shape[0] - 1
-            il_idx = st.slider("Inline index", 0, max_il, max_il // 2, key="il_slider")
-            _delrt = st.session_state.meta_3d.get("delrt_ms", 0.0) if st.session_state.meta_3d else 0.0
+            il_idx = st.slider(
+                "Inline Index",
+                0, max_il, max_il // 2,
+                key="il_slider",
+                help="Select inline number (vertical section perpendicular to inline direction)",
+            )
+            inline_label = grid.inlines[il_idx] if grid is not None and il_idx < len(grid.inlines) else il_idx
+            st.caption(f"**Inline: {inline_label}** | Index {il_idx} of {max_il}")
+
             time_ax = _delrt + np.arange(vol.shape[2]) * (grid.dt_ms if grid else 2.0)
 
-            if volume_sel == "Side by Side" and orig_vol is not None:
+            if volume_sel == "Side by Side Comparison" and orig_vol is not None:
                 c1, c2 = st.columns(2)
                 with c1:
                     il_o = min(il_idx, orig_vol.shape[0] - 1)
-                    fig = plot_inline_section(orig_vol, il_o, time_axis=time_ax[:orig_vol.shape[2]],
-                                             title="Original", height=400)
-                    st.plotly_chart(fig, use_container_width=True)
+                    fig = plot_inline_section(
+                        orig_vol, il_o,
+                        xlines=st.session_state.xlines_3d,
+                        time_axis=time_ax[:orig_vol.shape[2]],
+                        title=f"Original — Inline {inline_label}",
+                        height=450,
+                    )
+                    st.plotly_chart(fig, width='stretch')
                 with c2:
-                    fig = plot_inline_section(vol, il_idx, time_axis=time_ax, title="Extended", height=400)
-                    st.plotly_chart(fig, use_container_width=True)
+                    fig = plot_inline_section(
+                        vol, il_idx,
+                        xlines=grid.xlines if grid else None,
+                        time_axis=time_ax,
+                        title=f"Extended — Inline {inline_label}",
+                        height=450,
+                    )
+                    st.plotly_chart(fig, width='stretch')
             else:
                 show_vol = vol if "Final" in volume_sel else (orig_vol if orig_vol is not None else vol)
                 idx = min(il_idx, show_vol.shape[0] - 1)
-                fig = plot_inline_section(show_vol, idx, time_axis=time_ax[:show_vol.shape[2]])
-                st.plotly_chart(fig, use_container_width=True)
+                xlines_to_use = grid.xlines if grid is not None else None
+                if "Original" in volume_sel and st.session_state.xlines_3d is not None:
+                    xlines_to_use = st.session_state.xlines_3d
+                fig = plot_inline_section(
+                    show_vol, idx,
+                    xlines=xlines_to_use,
+                    time_axis=time_ax[:show_vol.shape[2]],
+                    title=f"{'Extended' if 'Final' in volume_sel else 'Original'} — Inline Section",
+                    height=500,
+                )
+                st.plotly_chart(fig, width='stretch')
 
-        else:  # Crossline
+        else:  # Crossline Section
             max_xl = vol.shape[1] - 1
-            xl_idx = st.slider("Crossline index", 0, max_xl, max_xl // 2, key="xl_slider")
-            _delrt = st.session_state.meta_3d.get("delrt_ms", 0.0) if st.session_state.meta_3d else 0.0
+            xl_idx = st.slider(
+                "Crossline Index",
+                0, max_xl, max_xl // 2,
+                key="xl_slider",
+                help="Select crossline number (vertical section perpendicular to crossline direction)",
+            )
+            xline_label = grid.xlines[xl_idx] if grid is not None and xl_idx < len(grid.xlines) else xl_idx
+            st.caption(f"**Crossline: {xline_label}** | Index {xl_idx} of {max_xl}")
+
             time_ax = _delrt + np.arange(vol.shape[2]) * (grid.dt_ms if grid else 2.0)
 
-            show_vol = vol if "Final" in volume_sel else (orig_vol if orig_vol is not None else vol)
-            idx = min(xl_idx, show_vol.shape[1] - 1)
-            section = show_vol[:, idx, :]
-            vmax = np.percentile(np.abs(section[np.isfinite(section)]), 98) if np.any(np.isfinite(section)) else 1.0
-            vmax = max(vmax, 1e-10)
-
-            import plotly.graph_objects as go
-            fig = go.Figure(data=go.Heatmap(
-                z=section.T, y=time_ax[:section.shape[1]],
-                colorscale=SEISMIC_COLORSCALE,
-                zmin=-vmax, zmax=vmax,
-            ))
-            fig.update_layout(
-                title=f"Crossline #{xl_idx}",
-                xaxis_title="Inline index", yaxis_title="Time (ms)",
-                height=500, paper_bgcolor=PALETTE["bg_dark"],
-                plot_bgcolor=PALETTE["bg_dark"], font=dict(color=PALETTE["text"]),
-                yaxis=dict(autorange="reversed"),
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            if volume_sel == "Side by Side Comparison" and orig_vol is not None:
+                c1, c2 = st.columns(2)
+                with c1:
+                    xl_o = min(xl_idx, orig_vol.shape[1] - 1)
+                    fig = plot_crossline_section(
+                        orig_vol, xl_o,
+                        inlines=st.session_state.inlines_3d,
+                        time_axis=time_ax[:orig_vol.shape[2]],
+                        title=f"Original — Crossline {xline_label}",
+                        height=450,
+                    )
+                    st.plotly_chart(fig, width='stretch')
+                with c2:
+                    fig = plot_crossline_section(
+                        vol, xl_idx,
+                        inlines=grid.inlines if grid else None,
+                        time_axis=time_ax,
+                        title=f"Extended — Crossline {xline_label}",
+                        height=450,
+                    )
+                    st.plotly_chart(fig, width='stretch')
+            else:
+                show_vol = vol if "Final" in volume_sel else (orig_vol if orig_vol is not None else vol)
+                idx = min(xl_idx, show_vol.shape[1] - 1)
+                inlines_to_use = grid.inlines if grid is not None else None
+                if "Original" in volume_sel and st.session_state.inlines_3d is not None:
+                    inlines_to_use = st.session_state.inlines_3d
+                fig = plot_crossline_section(
+                    show_vol, idx,
+                    inlines=inlines_to_use,
+                    time_axis=time_ax[:show_vol.shape[2]],
+                    title=f"{'Extended' if 'Final' in volume_sel else 'Original'} — Crossline Section",
+                    height=500,
+                )
+                st.plotly_chart(fig, width='stretch')
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1171,9 +1618,174 @@ with tab_qc:
             rows.append({"Metric": "Interpolation MAE (sim)", "Value": f"{sim['mae']:.4f}"})
             rows.append({"Metric": "Interpolation Corr (sim)", "Value": f"{sim['pearson_corr']:.4f}"})
 
-        if rows:
-            import pandas as pd
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        # Metrics with explanations
+        st.markdown("### Metrics Reference Guide")
+        st.caption("Click on metric name to see what it means and how to interpret")
+
+        metric_explanations = {
+            "Calibration Corr": {
+                "description": "Pearson correlation between 2D and 3D amplitudes",
+                "interpretation": "+1 = perfect match, 0 = no correlation, -1 = inverse. Above 0.7 is good.",
+                "good_range": "> 0.7",
+            },
+            "Calibration RMSE": {
+                "description": "Root Mean Square Error of amplitude differences",
+                "interpretation": "Lower is better. Typical seismic amplitudes are 1000-10000. Compare before/after.",
+                "good_range": "↓ lower",
+            },
+            "Calibration MAE": {
+                "description": "Mean Absolute Error of amplitude differences",
+                "interpretation": "Average absolute difference. Less sensitive to outliers than RMSE.",
+                "good_range": "↓ lower",
+            },
+            "Spectral L2": {
+                "description": "Spectral (frequency domain) L2 norm difference",
+                "interpretation": "Measures frequency content mismatch. Lower = better spectral matching.",
+                "good_range": "↓ < 1.0",
+            },
+            "Interpolation RMSE": {
+                "description": "RMSE of reconstructed vs true 3D amplitudes (simulation)",
+                "interpretation": "How well interpolation fills gaps. Tested on hidden 3D data.",
+                "good_range": "↓ lower",
+            },
+            "Interpolation MAE": {
+                "description": "MAE of reconstructed vs true 3D amplitudes",
+                "interpretation": "Average reconstruction error. Typical: 10-30% of signal amplitude.",
+                "good_range": "↓ lower",
+            },
+            "Interpolation Corr": {
+                "description": "Correlation between interpolated and true 3D amplitudes",
+                "interpretation": "Quality of gap filling. > 0.5 acceptable, > 0.8 excellent.",
+                "good_range": "> 0.5",
+            },
+        }
+
+        # Display metrics with expanders for explanations
+        if before and after:
+            with st.expander("🔧 Calibration Metrics", expanded=True):
+                col_m1, col_m2, col_m3 = st.columns([2, 1, 3])
+                with col_m1:
+                    st.markdown("**Metric**")
+                with col_m2:
+                    st.markdown("**Value**")
+                with col_m3:
+                    st.markdown("**What it means**")
+
+                # Correlation before
+                col1, col2, col3 = st.columns([2, 1, 3])
+                with col1:
+                    st.markdown("Correlation (before)")
+                with col2:
+                    corr_b = before['corr']
+                    color = "🟢" if abs(corr_b) > 0.5 else "🟡" if abs(corr_b) > 0.3 else "🔴"
+                    st.markdown(f"{color} `{corr_b:.4f}`")
+                with col3:
+                    st.caption("Raw 2D vs 3D match before any calibration")
+
+                # Correlation after
+                col1, col2, col3 = st.columns([2, 1, 3])
+                with col1:
+                    st.markdown("**Correlation (after)**")
+                with col2:
+                    corr_a = after['pearson_corr']
+                    color = "🟢" if abs(corr_a) > 0.7 else "🟡" if abs(corr_a) > 0.5 else "🔴"
+                    delta = f" ({corr_a - corr_b:+.3f})"
+                    st.markdown(f"{color} **`{corr_a:.4f}`{delta}**")
+                with col3:
+                    st.caption("After calibration. Should be higher than 'before'. Target: > 0.7")
+
+                # RMSE before
+                col1, col2, col3 = st.columns([2, 1, 3])
+                with col1:
+                    st.markdown("RMSE (before)")
+                with col2:
+                    st.markdown(f"`{before['rmse']:.1f}`")
+                with col3:
+                    st.caption("Amplitude error before calibration (typical: 1000-15000)")
+
+                # RMSE after
+                col1, col2, col3 = st.columns([2, 1, 3])
+                with col1:
+                    st.markdown("**RMSE (after)**")
+                with col2:
+                    rmse_a = after['rmse']
+                    improvement = (1 - rmse_a / before['rmse']) * 100 if before['rmse'] > 0 else 0
+                    st.markdown(f"**`{rmse_a:.1f}`** ({improvement:.0f}% better)")
+                with col3:
+                    st.caption("Lower is better. Good calibration reduces RMSE by 30-70%")
+
+                # MAE
+                if "mae" in after:
+                    col1, col2, col3 = st.columns([2, 1, 3])
+                    with col1:
+                        st.markdown("MAE")
+                    with col2:
+                        st.markdown(f"`{after['mae']:.1f}`")
+                    with col3:
+                        st.caption("Mean absolute amplitude error. More robust than RMSE.")
+
+                # Spectral
+                if "spectral_l2_rel" in after:
+                    col1, col2, col3 = st.columns([2, 1, 3])
+                    with col1:
+                        st.markdown("Spectral L2 (rel)")
+                    with col2:
+                        spec = after['spectral_l2_rel']
+                        color = "🟢" if spec < 1.0 else "🟡" if spec < 2.0 else "🔴"
+                        st.markdown(f"{color} `{spec:.3f}`")
+                    with col3:
+                        st.caption("Frequency content match. < 1.0 = good spectral alignment")
+
+        if sim:
+            with st.expander("🧩 Interpolation Metrics", expanded=True):
+                col_m1, col_m2, col_m3 = st.columns([2, 1, 3])
+                with col_m1:
+                    st.markdown("**Metric**")
+                with col_m2:
+                    st.markdown("**Value**")
+                with col_m3:
+                    st.markdown("**What it means**")
+
+                # Interpolation Corr
+                col1, col2, col3 = st.columns([2, 1, 3])
+                with col1:
+                    st.markdown("**Correlation (sim)**")
+                with col2:
+                    interp_corr = sim['pearson_corr']
+                    color = "🟢" if interp_corr > 0.7 else "🟡" if interp_corr > 0.5 else "🔴"
+                    st.markdown(f"{color} **`{interp_corr:.4f}`**")
+                with col3:
+                    st.caption("How well interpolation recovers hidden 3D. > 0.5 OK, > 0.8 excellent")
+
+                # Interpolation RMSE
+                col1, col2, col3 = st.columns([2, 1, 3])
+                with col1:
+                    st.markdown("RMSE (sim)")
+                with col2:
+                    st.markdown(f"`{sim['rmse']:.1f}`")
+                with col3:
+                    st.caption("Reconstruction error on simulated gaps. Lower = better filling.")
+
+                # Interpolation MAE
+                col1, col2, col3 = st.columns([2, 1, 3])
+                with col1:
+                    st.markdown("MAE (sim)")
+                with col2:
+                    st.markdown(f"`{sim['mae']:.1f}`")
+                with col3:
+                    st.caption("Average reconstruction error. Compare to signal amplitude.")
+
+        # Summary interpretation
+        st.info("""
+        **How to read this report:**
+
+        **Calibration** should improve correlation (higher) and reduce RMSE (lower).
+        If 'after' is worse than 'before', the calibrator may be overfitting or the overlap zone is too small.
+
+        **Interpolation** quality depends on 2D line spacing and method choice.
+        Correlation > 0.5 is acceptable, > 0.7 is good. IDW is robust but may smooth details.
+        POCS/MSSA can capture complex patterns but need sufficient 2D coverage.
+        """)
 
         # Calibration improvement bar chart
         if before and after:
@@ -1193,7 +1805,7 @@ with tab_qc:
                 plot_bgcolor=PALETTE["bg_dark"],
                 font=dict(color=PALETTE["text"]),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
         # Download QC JSON
         cfg = st.session_state.config_obj

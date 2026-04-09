@@ -64,6 +64,25 @@ class TargetGrid:
         y = self.origin_y + il_idx * self.il_step_y + xl_idx * self.xl_step_y
         return x, y
 
+    def xy_at_corners(self, il_array: list, xl_array: list) -> tuple[np.ndarray, np.ndarray]:
+        """Compute world coordinates for arrays of IL/XL values.
+
+        Parameters
+        ----------
+        il_array, xl_array : arrays of inline/crossline values
+
+        Returns
+        -------
+        x_coords, y_coords : arrays of world coordinates
+        """
+        il_arr = np.asarray(il_array, dtype=float)
+        xl_arr = np.asarray(xl_array, dtype=float)
+        il_idx = (il_arr - self.inlines[0]) / (self.inlines[1] - self.inlines[0]) if len(self.inlines) > 1 else il_arr - self.inlines[0]
+        xl_idx = (xl_arr - self.xlines[0]) / (self.xlines[1] - self.xlines[0]) if len(self.xlines) > 1 else xl_arr - self.xlines[0]
+        x = self.origin_x + il_idx * self.il_step_x + xl_idx * self.xl_step_x
+        y = self.origin_y + il_idx * self.il_step_y + xl_idx * self.xl_step_y
+        return x, y
+
 
 @dataclass
 class SparseVolume:
