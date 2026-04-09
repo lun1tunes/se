@@ -9,6 +9,22 @@ from typing import Any
 import streamlit as st
 
 
+class WorkStep(int, Enum):
+    """Step-by-step workflow stages."""
+    DATA_LOADING = 1
+    CALIBRATION = 2
+    INTERPOLATION = 3
+    DONE = 4
+
+
+STEP_LABELS = {
+    WorkStep.DATA_LOADING: "📁 Step 1: Data Loading",
+    WorkStep.CALIBRATION: "🔧 Step 2: Calibration",
+    WorkStep.INTERPOLATION: "🧩 Step 3: Interpolation",
+    WorkStep.DONE: "✅ Complete",
+}
+
+
 class PipelineStage(str, Enum):
     IDLE = "idle"
     INGESTING = "ingesting"
@@ -54,6 +70,7 @@ def init_state() -> None:
     """Initialise session state defaults."""
     defaults = {
         "pipeline_stage": PipelineStage.IDLE,
+        "work_step": WorkStep.DATA_LOADING,
         "pipeline_progress": 0.0,
         "pipeline_log": [],
         "config_dict": None,
@@ -70,6 +87,15 @@ def init_state() -> None:
         "target_grid": None,
         "qc_data": None,
         "error_msg": None,
+        # Step-specific settings
+        "cal_method": "global_shift",
+        "cal_params": {},
+        "interp_method": "idw",
+        "interp_params": {},
+        "test_split_pct": 20.0,
+        "data_loaded": False,
+        "calibration_done": False,
+        "interpolation_done": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:

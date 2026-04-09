@@ -450,6 +450,7 @@ class PipelineRunner:
         cube_volume: np.ndarray,
         inlines_3d: np.ndarray,
         xlines_3d: np.ndarray,
+        test_ratio: float | None = None,
     ) -> tuple[CalibrationPair, CalibrationPair]:
         """Build train/test calibration pairs from overlap zones."""
         cfg = self._cfg
@@ -508,7 +509,7 @@ class PipelineRunner:
         logger.info("Total calibration pairs: {}", n)
 
         # Spatial holdout split
-        holdout = cfg.calibration.holdout_fraction
+        holdout = test_ratio if test_ratio is not None else cfg.calibration.holdout_fraction
         if cfg.calibration.holdout_mode == "segment":
             # Split by contiguous segments (by index)
             n_test = max(1, int(n * holdout))

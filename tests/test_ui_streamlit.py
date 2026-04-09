@@ -75,29 +75,47 @@ class TestSidebarElements:
         assert any("3D" in label for label in input_labels), "3D folder input not found"
         assert any("2D" in label for label in input_labels), "2D folder input not found"
 
-    def test_sidebar_has_settings_controls(self, app_test: AppTest) -> None:
-        """Verify sidebar has settings controls (slider, selectboxes)."""
+    def test_sidebar_has_step_navigation(self, app_test: AppTest) -> None:
+        """Verify sidebar has step navigation buttons for step-by-step workflow."""
         app_test.run()
         sidebar = app_test.sidebar
-        
+
+        # Check for step navigation buttons
+        buttons = sidebar.button
+        step_buttons = [b for b in buttons if any(x in str(b.label) for x in ["Data", "Cal", "Interp"])]
+
+        # Should have navigation buttons for steps
+        assert len(step_buttons) >= 3, "Expected step navigation buttons (Data, Cal, Interp)"
+
+    def test_sidebar_has_data_loading_controls(self, app_test: AppTest) -> None:
+        """Verify Step 1 has data loading controls."""
+        app_test.run()
+        sidebar = app_test.sidebar
+
+        # On initial load (Step 1), should have data loading button
+        buttons = sidebar.button
+        load_buttons = [b for b in buttons if "Load" in str(b.label) or "Data" in str(b.label)]
+
+        assert len(load_buttons) > 0, "Data loading controls should exist in Step 1"
+
+    def test_sidebar_has_expansion_slider(self, app_test: AppTest) -> None:
+        """Verify sidebar has expansion buffer slider in Step 1."""
+        app_test.run()
+        sidebar = app_test.sidebar
+
         # Check for expansion buffer slider
         sliders = sidebar.slider
-        assert len(sliders) > 0, "No slider found in sidebar"
-        
-        # Check for selectboxes (calibration and interpolation methods)
-        selectboxes = sidebar.selectbox
-        assert len(selectboxes) >= 2, "Expected at least 2 selectboxes (calibration, interpolation)"
+        assert len(sliders) > 0, "Expansion buffer slider should be in sidebar"
 
-    def test_run_button_exists_in_sidebar(self, app_test: AppTest) -> None:
-        """Verify run button exists in sidebar."""
+    def test_sidebar_has_reset_button(self, app_test: AppTest) -> None:
+        """Verify reset button exists in sidebar."""
         app_test.run()
         sidebar = app_test.sidebar
-        
+
         buttons = sidebar.button
-        run_buttons = [b for b in buttons if "Run" in str(b.label) or "▶" in str(b.label)]
-        
-        # Button should exist
-        assert len(run_buttons) > 0, "Run button should exist in sidebar"
+        reset_buttons = [b for b in buttons if "Reset" in str(b.label)]
+
+        assert len(reset_buttons) > 0, "Reset button should exist in sidebar"
 
 
 class TestDashboardTab:
