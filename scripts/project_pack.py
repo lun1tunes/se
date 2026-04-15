@@ -24,15 +24,15 @@ EXCLUDED_DIR_NAMES = {
 
 INCLUDED_FILE_EXTENSIONS = {
     ".py",
-    ".md",
+    # ".md",
     ".ini",
     ".cfg",
     ".toml",
     ".yaml",
     ".yml",
-    ".json",
-    ".js",
-    ".css",
+    # ".json",
+    # ".js",
+    # ".css",
 }
 
 INCLUDED_FILE_NAMES = {}

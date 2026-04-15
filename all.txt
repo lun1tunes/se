@@ -2,138 +2,6 @@
 [browser]
 gatherUsageStats = false
 ===END_FILE===
-===BEGIN_FILE===	README.md	5811
-# seis2cube
-
-**Extend 3D SEG-Y cubes from 2D seismic profiles with calibration against existing 3D.**
-
-## Overview
-
-`seis2cube` builds a new 3D post-stack SEG-Y volume that covers an expanded area by:
-
-1. **Calibrating** 2D SEG-Y lines to match an existing 3D cube (amplitude, time shift, phase, spectrum) in their overlap zone.
-2. **Interpolating** between calibrated 2D lines to fill a regular 3D grid in the expansion area.
-3. **Assembling** the original 3D (as ground truth) and the reconstructed extension into a single output SEG-Y.
-
-### Key features
-
-- **SEG-Y Rev 1 compliance** — configurable header byte positions (inline/xline/X/Y), multiple coordinate sources (Source, Group, CDP), proper scalar handling.
-- **Multi-level calibration** (Strategy pattern, switchable via config):
-  - Level 0: Global Δt / gain / phase / spectral matching filter.
-  - Level 1: Windowed (time-varying) shift & gain.
-  - Level 2: Ridge / ElasticNet / Huber regression on trace features.
-  - Level 3: Gradient Boosting (sklearn / XGBoost / LightGBM).
-- **Multi-level interpolation**:
-  - IDW per time-slice (baseline).
-  - POCS / FPOCS with FFT or wavelet thresholding.
-  - MSSA (Multichannel Singular Spectrum Analysis).
-- **Honest validation** — calibration and interpolation are tuned/evaluated on hold-out data within the existing 3D (spatial splits only, no random-sample leakage).
-- **Performance** — lazy segyio trace reading, optional `mmap()`, numpy.memmap / Zarr intermediate storage, Dask parallelism for time-slice processing.
-- **CRS reprojection** via pyproj.
-- **QC reporting** — JSON + CSV metrics, before/after calibration comparison.
-
-## Installation
-
-```bash
-pip install -e .            # core dependencies
-pip install -e ".[dask]"    # + Dask/xarray/Zarr/segysak
-pip install -e ".[ml]"      # + XGBoost/LightGBM
-pip install -e ".[all]"     # everything
-```
-
-## Quick start
-
-```bash
-# 1. Validate config & inputs
-seis2cube validate --config config_example.yaml
-
-# 2. Run the full pipeline
-seis2cube run --config config_example.yaml -v
-```
-
-## Configuration
-
-See [`config_example.yaml`](config_example.yaml) for a fully commented template.
-Key sections:
-
-| Section | Purpose |
-|---------|---------|
-| `header_bytes` | SEG-Y inline/xline/coord byte positions |
-| `io` | mmap, strict, ignore_geometry, chunking |
-| `crs` | Source & target CRS (EPSG codes) |
-| `calibration` | Method, windows, holdout, features |
-| `interpolation` | Method, POCS/MSSA/IDW parameters |
-| `compute` | numpy vs dask backend, workers, memory |
-| `blend` | Seam blending at 3D/extension boundary |
-
-## Architecture
-
-```
-seis2cube/
-├── config.py              # Pydantic config models
-├── cli.py                 # Click CLI
-├── io/
-│   ├── segy_dataset.py    # SegyDataset (read abstraction over segyio)
-│   ├── segy_writer.py     # SegyWriter3D (structured SEG-Y output)
-│   └── chunked_storage.py # memmap / Zarr / Dask adapters
-├── geometry/
-│   ├── crs_converter.py   # CRS reprojection (pyproj)
-│   ├── geometry_model.py  # AffineGridMapper / KDTreeMapper
-│   └── overlap_detector.py# 2D↔3D overlap classification
-├── models/
-│   ├── line2d.py          # Line2D data model
-│   └── volume.py          # TargetGrid, SparseVolume
-├── calibration/
-│   ├── base.py            # CalibrationStrategy ABC
-│   ├── global_shift.py    # Level 0: Δt/gain/phase
-│   ├── windowed.py        # Level 1: windowed corrections
-│   ├── regression.py      # Level 2: linear regression
-│   └── gbdt.py            # Level 3: gradient boosting
-├── interpolation/
-│   ├── base.py            # InterpolationStrategy ABC
-│   ├── idw.py             # IDW per time-slice
-│   ├── pocs.py            # POCS / FPOCS
-│   └── mssa.py            # MSSA reconstruction
-├── pipeline/
-│   ├── volume_builder.py  # Grid construction, assembly, blending
-│   └── runner.py          # Full pipeline orchestration
-├── qc/
-│   ├── metrics.py         # CalibrationMetrics, InterpolationMetrics
-│   └── reporter.py        # QCReporter (JSON/CSV)
-└── utils/
-    ├── spectral.py        # Hilbert, phase rotation, matching filter, xcorr
-    └── array_utils.py     # Windowing, blending, feature extraction
-```
-
-## Pipeline steps
-
-1. **Ingest & Validate** — open 3D and 2D SEG-Y files, check dt/samples/format.
-2. **CRS Conversion** — reproject all coordinates to a common projected CRS.
-3. **Geometry Model** — build inline/xline ↔ (X,Y) mapping (affine or KDTree).
-4. **Overlap Detection** — classify 2D trace points as inside/outside 3D coverage.
-5. **Calibration Pairs** — match 2D amplitudes with bilinear-interpolated 3D amplitudes.
-6. **Calibrate** — train selected strategy on overlap, evaluate on spatial holdout.
-7. **Apply Calibration** — correct all 2D lines (including segments outside 3D).
-8. **Target Grid** — define extended inline/xline grid covering 3D + expansion polygon.
-9. **Tune Interpolation** — simulate sparse reconstruction inside 3D to select hyperparameters.
-10. **Reconstruct Extension** — fill missing traces via selected interpolation method.
-11. **Assemble** — merge original 3D + extension with optional cosine-taper blending.
-12. **Write SEG-Y** — output structured 3D SEG-Y with correct headers.
-13. **QC Report** — save metrics and diagnostics.
-
-## References
-
-- **SEG-Y Rev 1 standard** — binary header bytes 3217-3218 (sample interval µs), 3221-3222 (samples/trace), 3225-3226 (format code); trace header coordinate scalar bytes 71-72.
-- **segyio** — `segyio.open(iline=, xline=, strict=, ignore_geometry=)`, `f.mmap()`, lazy trace interface.
-- **POCS** — iterative thresholding reconstruction for irregularly sampled seismic data.
-- **MSSA / I-MSSA** — low-rank Hankel-matrix reconstruction, handles off-grid observations.
-- **Multi-vintage matching** — amplitude, time shift, phase, and spectral cross-equalization.
-
-## License
-
-MIT
-
-===END_FILE===
 ===BEGIN_FILE===	config_example.yaml	2846
 # seis2cube pipeline configuration
 # Copy this file, adjust paths and parameters, then run:
@@ -1029,7 +897,7 @@ print(f"   Correlation: {corrs_before.mean():.4f} → {corrs_after.mean():.4f}")
 print(f"   RMSE:        {baseline_rmse:.2f} → {metrics_after['rmse']:.2f}")
 
 ===END_FILE===
-===BEGIN_FILE===	scripts/project_pack.py	7617
+===BEGIN_FILE===	scripts/project_pack.py	7625
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -1056,15 +924,15 @@ EXCLUDED_DIR_NAMES = {
 
 INCLUDED_FILE_EXTENSIONS = {
     ".py",
-    ".md",
+    # ".md",
     ".ini",
     ".cfg",
     ".toml",
     ".yaml",
     ".yml",
-    ".json",
-    ".js",
-    ".css",
+    # ".json",
+    # ".js",
+    # ".css",
 }
 
 INCLUDED_FILE_NAMES = {}
@@ -4231,7 +4099,7 @@ from seis2cube.pipeline.runner import PipelineRunner
 __all__ = ["VolumeBuilder", "PipelineRunner"]
 
 ===END_FILE===
-===BEGIN_FILE===	seis2cube/pipeline/runner.py	24373
+===BEGIN_FILE===	seis2cube/pipeline/runner.py	24456
 """PipelineRunner: orchestrates the full seis2cube workflow.
 
 Steps:
@@ -4684,6 +4552,7 @@ class PipelineRunner:
         cube_volume: np.ndarray,
         inlines_3d: np.ndarray,
         xlines_3d: np.ndarray,
+        test_ratio: float | None = None,
     ) -> tuple[CalibrationPair, CalibrationPair]:
         """Build train/test calibration pairs from overlap zones."""
         cfg = self._cfg
@@ -4742,7 +4611,7 @@ class PipelineRunner:
         logger.info("Total calibration pairs: {}", n)
 
         # Spatial holdout split
-        holdout = cfg.calibration.holdout_fraction
+        holdout = test_ratio if test_ratio is not None else cfg.calibration.holdout_fraction
         if cfg.calibration.holdout_mode == "segment":
             # Split by contiguous segments (by index)
             n_test = max(1, int(n * holdout))
@@ -5258,7 +5127,7 @@ class QCReporter:
 """Streamlit UI for seis2cube."""
 
 ===END_FILE===
-===BEGIN_FILE===	seis2cube/ui/app.py	78457
+===BEGIN_FILE===	seis2cube/ui/app.py	87549
 """
 seis2cube — Streamlit Dashboard
 
@@ -5290,6 +5159,8 @@ from seis2cube.ui.state import (
     PipelineStage,
     STAGE_LABELS,
     STAGE_ORDER,
+    WorkStep,
+    STEP_LABELS,
     add_log,
     init_state,
     set_stage,
@@ -5313,116 +5184,19 @@ from seis2cube.ui.components import (
 
 init_state()
 
-# ── Global CSS ──────────────────────────────────────────────────────────
-
-st.markdown(
-    f"""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
-    html, body, [class*="st-"] {{
-        font-family: 'Inter', sans-serif;
-    }}
-    .stApp {{
-        background-color: {PALETTE['bg_dark']};
-    }}
-    section[data-testid="stSidebar"] {{
-        background-color: {PALETTE['bg_card']};
-        border-right: 1px solid #313244;
-    }}
-    section[data-testid="stSidebar"] .stMarkdown p,
-    section[data-testid="stSidebar"] .stMarkdown label {{
-        color: {PALETTE['text']};
-    }}
-    h1, h2, h3 {{
-        color: {PALETTE['text']} !important;
-    }}
-    .stTabs [data-baseweb="tab-list"] {{
-        gap: 8px;
-    }}
-    .stTabs [data-baseweb="tab"] {{
-        background-color: {PALETTE['bg_card']};
-        border-radius: 8px 8px 0 0;
-        border: 1px solid #313244;
-        color: {PALETTE['text_muted']};
-        padding: 8px 20px;
-    }}
-    .stTabs [aria-selected="true"] {{
-        background-color: {PALETTE['primary']};
-        color: white !important;
-        border-color: {PALETTE['primary']};
-    }}
-    div[data-testid="stExpander"] {{
-        background-color: {PALETTE['bg_card']};
-        border: 1px solid #313244;
-        border-radius: 12px;
-        overflow: hidden;
-    }}
-    div[data-testid="stExpander"] p,
-    div[data-testid="stExpander"] span,
-    div[data-testid="stExpander"] label,
-    div[data-testid="stExpander"] summary,
-    div[data-testid="stExpander"] [data-testid="stMarkdownContainer"] {{
-        color: {PALETTE['text']} !important;
-        line-height: 1.5 !important;
-    }}
-    div[data-testid="stExpander"] summary {{
-        display: flex !important;
-        align-items: center !important;
-        gap: 8px !important;
-    }}
-    div[data-testid="stExpander"] summary > span:first-child {{
-        margin: 0 !important;
-        padding: 0 !important;
-        display: inline-flex !important;
-        align-items: center !important;
-    }}
-    div[data-testid="stExpander"] summary p {{
-        margin: 0 !important;
-        padding: 0 !important;
-        display: inline !important;
-    }}
-    div[data-testid="stExpander"] code {{
-        color: {PALETTE['primary']} !important;
-        background-color: rgba(137, 180, 250, 0.12) !important;
-    }}
-    .stSelectbox label, .stSlider label, .stNumberInput label, .stFileUploader label,
-    .stTextInput label {{
-        color: {PALETTE['text']} !important;
-    }}
-    /* Fix overlapping file-uploader text */
-    [data-testid="stFileUploader"] section {{
-        padding: 0;
-    }}
-    [data-testid="stFileUploader"] section > div {{
-        padding-top: 0 !important;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ── Native Streamlit Interface ─────────────────────────────────────────
 
 # ── Sidebar ─────────────────────────────────────────────────────────────
 
 
 def _sidebar() -> None:
     with st.sidebar:
-        st.markdown(
-            f"""
-            <div style="text-align:center; padding:16px 0;">
-                <span style="font-size:2rem;">🌊</span>
-                <h2 style="margin:4px 0 0 0; color:{PALETTE['text']};">seis2cube</h2>
-                <p style="color:{PALETTE['text_muted']}; font-size:0.8rem; margin:0;">
-                    3D SEG-Y Extension from 2D Profiles
-                </p>
-            </div>
-            <hr style="border-color:#313244;">
-            """,
-            unsafe_allow_html=True,
-        )
+        st.title("🌊 seis2cube")
+        st.caption("3D SEG-Y Extension from 2D Profiles")
+        st.divider()
 
         # ── Data paths ─────────────────────────────────────────────────
-        st.markdown(f"**📂 Input Data**")
+        st.header("📂 Input Data")
 
         # Auto-load from query param ?config=path/to/config.yaml
         _qp = st.query_params
@@ -5514,80 +5288,168 @@ def _sidebar() -> None:
         if _cube_files and _line_files:
             st.caption(f"✓ 3D: **{_cube_files[0].name}** · 2D: **{len(_line_files)}** profiles")
 
-        # ── Settings ──────────────────────────────────────────────────
+        # ── Step Navigation ───────────────────────────────────────────────
         st.divider()
-        st.markdown(f"**🎛️ Settings**")
+        st.markdown("**📋 Workflow Steps**")
 
-        expand_pct = st.slider(
-            "Expansion buffer, % of 3D size",
-            min_value=0, max_value=200, value=50, step=5,
-            help="Buffer around 3D hull as % of mean side. 50% extends half a cube width on each side (area ≈ 4×).",
-        )
+        current_step = st.session_state.work_step
 
-        cal_opts = ["global_shift", "windowed", "linear_regression", "gbdt"]
-        cal_method = st.selectbox("Calibration method", cal_opts, index=0)
+        # Show step status indicators
+        for step in [WorkStep.DATA_LOADING, WorkStep.CALIBRATION, WorkStep.INTERPOLATION, WorkStep.DONE]:
+            label = STEP_LABELS[step]
+            if step == current_step:
+                st.markdown(f"▶ **{label}** ← current")
+            elif step < current_step:
+                st.markdown(f"✅ ~~{label}~~")
+            else:
+                st.markdown(f"○ {label}")
 
-        interp_opts = ["idw", "pocs", "mssa"]
-        interp_method = st.selectbox("Interpolation method", interp_opts, index=0)
+        # Step jump buttons
+        st.caption("Navigate to step:")
+        nav_cols = st.columns(3)
+        with nav_cols[0]:
+            if st.button("1️⃣ Data", disabled=current_step == WorkStep.DATA_LOADING, use_container_width=True):
+                st.session_state.work_step = WorkStep.DATA_LOADING
+                st.rerun()
+        with nav_cols[1]:
+            can_cal = st.session_state.data_loaded
+            if st.button("2️⃣ Cal", disabled=not can_cal or current_step == WorkStep.CALIBRATION, use_container_width=True):
+                st.session_state.work_step = WorkStep.CALIBRATION
+                st.rerun()
+        with nav_cols[2]:
+            can_interp = st.session_state.calibration_done
+            if st.button("3️⃣ Interp", disabled=not can_interp or current_step == WorkStep.INTERPOLATION, use_container_width=True):
+                st.session_state.work_step = WorkStep.INTERPOLATION
+                st.rerun()
 
-        blend_traces = st.number_input(
-            "Blend taper (traces)", min_value=0, max_value=50, value=10, step=1,
-            help="Cosine taper width at the seam between original and extended zones.",
-        )
-
-        # ── Build config from UI fields ───────────────────────────────
-        if _cube_files and _line_files:
-            try:
-                from seis2cube.config import (
-                    PipelineConfig, CalibrationMethod, InterpolationMethod,
-                )
-                cfg_obj = PipelineConfig(
-                    cube3d_path=_cube_files[0],
-                    lines2d_paths=_line_files,
-                    expand_polygon_path=None,
-                    expand_buffer_pct=float(expand_pct),
-                )
-                cfg_obj.calibration.method = CalibrationMethod(cal_method)
-                cfg_obj.interpolation.method = InterpolationMethod(interp_method)
-                cfg_obj.blend.taper_width_traces = int(blend_traces)
-                st.session_state.config_obj = cfg_obj
-            except Exception as e:
-                st.error(f"Config error: {e}")
-
-        # ── Pipeline control ────────────────────────────────────────────
         st.divider()
-        st.markdown(f"**🚀 Pipeline**")
 
-        stage = st.session_state.pipeline_stage
-        if stage == PipelineStage.IDLE:
-            render_status_badge("Ready", "info")
-        elif stage == PipelineStage.DONE:
-            render_status_badge("Complete", "success")
-        elif stage == PipelineStage.ERROR:
-            render_status_badge("Error", "error")
-        else:
-            render_status_badge("Running", "running")
+        # ── Step-Specific Settings ─────────────────────────────────────
+        if current_step == WorkStep.DATA_LOADING:
+            st.markdown("**📁 Step 1: Data Loading Settings**")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            run_btn = st.button(
-                "▶ Run",
-                use_container_width=True,
-                disabled=st.session_state.config_obj is None or stage not in (
-                    PipelineStage.IDLE, PipelineStage.DONE, PipelineStage.ERROR
-                ),
-                type="primary",
+            expand_pct = st.slider(
+                "Expansion buffer, % of 3D size",
+                min_value=0, max_value=200, value=50, step=5,
+                help="Buffer around 3D hull as % of mean side.",
             )
-        with col2:
-            reset_btn = st.button("↺ Reset", use_container_width=True)
 
-        if reset_btn:
+            test_split_pct = st.slider(
+                "Test split, % of overlap data",
+                min_value=5, max_value=50, value=20, step=5,
+                help="Percentage of overlap zone held out for testing calibration quality.",
+            )
+            st.session_state.test_split_pct = test_split_pct
+
+            # Build base config
+            if _cube_files and _line_files:
+                try:
+                    from seis2cube.config import PipelineConfig
+                    cfg_obj = PipelineConfig(
+                        cube3d_path=_cube_files[0],
+                        lines2d_paths=_line_files,
+                        expand_polygon_path=None,
+                        expand_buffer_pct=float(expand_pct),
+                    )
+                    st.session_state.config_obj = cfg_obj
+                    st.success("✅ Data configured")
+                except Exception as e:
+                    st.error(f"Config error: {e}")
+
+            # Load button
+            if st.button("📥 Load Data", type="primary", use_container_width=True,
+                        disabled=not (_cube_files and _line_files)):
+                _run_step_data_loading()
+
+        elif current_step == WorkStep.CALIBRATION:
+            st.markdown("**🔧 Step 2: Calibration Settings**")
+
+            cal_opts = ["global_shift", "windowed", "linear_regression", "gbdt"]
+            cal_method = st.selectbox("Method", cal_opts,
+                                      index=cal_opts.index(st.session_state.get("cal_method", "global_shift")),
+                                      key="cal_method_select")
+            st.session_state.cal_method = cal_method
+
+            # Method-specific parameters
+            with st.expander("⚙️ Method Parameters", expanded=True):
+                cal_params = {}
+
+                if cal_method == "global_shift":
+                    cal_params["max_shift_ms"] = st.slider("Max time shift (ms)", 10.0, 200.0, 50.0, 5.0)
+                    cal_params["estimate_phase"] = st.checkbox("Estimate phase rotation", value=True)
+                    cal_params["estimate_matching_filter"] = st.checkbox("Use spectral matching", value=False)
+                    if cal_params["estimate_matching_filter"]:
+                        cal_params["matching_filter_taps"] = st.slider("Filter taps", 11, 101, 51, 2)
+
+                elif cal_method == "windowed":
+                    cal_params["window_ms"] = st.slider("Window length (ms)", 100.0, 1000.0, 400.0, 50.0)
+                    cal_params["overlap_ms"] = st.slider("Window overlap (ms)", 0.0, 200.0, 100.0, 10.0)
+                    cal_params["max_shift_ms"] = st.slider("Max shift per window (ms)", 10.0, 100.0, 30.0, 5.0)
+                    cal_params["cc_threshold"] = st.slider("Min correlation threshold", 0.1, 0.9, 0.3, 0.05)
+
+                elif cal_method == "linear_regression":
+                    reg_opts = ["ridge", "elasticnet", "huber"]
+                    cal_params["regressor_name"] = st.selectbox("Regressor type", reg_opts, index=0)
+                    cal_params["window_samples"] = st.slider("Feature window (samples)", 16, 256, 64, 8)
+
+                elif cal_method == "gbdt":
+                    backend_opts = ["sklearn", "xgboost", "lightgbm"]
+                    cal_params["backend"] = st.selectbox("GBDT backend", backend_opts, index=0)
+                    cal_params["n_estimators"] = st.slider("Number of trees", 50, 500, 200, 25)
+                    cal_params["max_depth"] = st.slider("Max tree depth", 3, 12, 6, 1)
+                    cal_params["learning_rate"] = st.slider("Learning rate", 0.01, 0.3, 0.1, 0.01)
+                    cal_params["window_samples"] = st.slider("Feature window (samples)", 16, 256, 64, 8)
+
+                st.session_state.cal_params = cal_params
+
+            if st.button("🎯 Run Calibration", type="primary", use_container_width=True,
+                        disabled=not st.session_state.data_loaded):
+                _run_step_calibration()
+
+        elif current_step == WorkStep.INTERPOLATION:
+            st.markdown("**🧩 Step 3: Interpolation Settings**")
+
+            interp_opts = ["idw", "pocs", "mssa"]
+            interp_method = st.selectbox("Method", interp_opts,
+                                         index=interp_opts.index(st.session_state.get("interp_method", "idw")),
+                                         key="interp_method_select")
+            st.session_state.interp_method = interp_method
+
+            # Method-specific parameters
+            with st.expander("⚙️ Method Parameters", expanded=True):
+                interp_params = {}
+
+                if interp_method == "idw":
+                    interp_params["power"] = st.slider("IDW power", 0.5, 4.0, 2.0, 0.5)
+                    interp_params["max_neighbours"] = st.slider("Max neighbours", 4, 32, 12, 2)
+
+                elif interp_method == "pocs":
+                    interp_params["n_iter"] = st.slider("Iterations", 20, 300, 100, 10)
+                    interp_params["fast"] = st.checkbox("Use FPOCS (fast)", value=True)
+                    interp_params["threshold_start_pct"] = st.slider("Start threshold (%)", 90.0, 99.9, 99.0, 0.1)
+                    interp_params["threshold_end_pct"] = st.slider("End threshold (%)", 0.1, 10.0, 1.0, 0.1)
+
+                elif interp_method == "mssa":
+                    interp_params["rank"] = st.slider("Target rank", 5, 100, 20, 5)
+                    interp_params["window"] = st.slider("Window length (traces)", 10, 200, 50, 10)
+                    interp_params["n_iter"] = st.slider("Iterations", 5, 100, 30, 5)
+
+                st.session_state.interp_params = interp_params
+
+            blend_traces = st.slider("Blend taper (traces)", 0, 50, 10, 1,
+                                     help="Cosine taper at seam between original and extended zones.")
+            st.session_state.blend_taper = blend_traces
+
+            if st.button("🚀 Run Interpolation", type="primary", use_container_width=True,
+                        disabled=not st.session_state.calibration_done):
+                _run_step_interpolation()
+
+        # Global reset
+        st.divider()
+        if st.button("↺ Reset All", use_container_width=True):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
-
-        if run_btn:
-            _run_pipeline()
 
         # ── Log ─────────────────────────────────────────────────────────
         if st.session_state.pipeline_log:
@@ -5597,47 +5459,101 @@ def _sidebar() -> None:
                     st.text(msg)
 
 
-# ── Pipeline runner (with UI progress updates) ─────────────────────────
+# ── Step-by-step pipeline runners ───────────────────────────────────────
 
 
-def _run_pipeline() -> None:
-    """Execute the pipeline with progress feedback into session state."""
+def _create_calibrator_with_params(cfg):
+    """Create calibrator with UI-selected parameters."""
+    from seis2cube.calibration.global_shift import GlobalShiftGainPhase
+    from seis2cube.calibration.windowed import WindowedShiftGain
+    from seis2cube.calibration.regression import LinearRegressionCalibrator
+    from seis2cube.calibration.gbdt import GBDTCalibrator
+
+    cal_method = st.session_state.cal_method
+    cal_params = st.session_state.cal_params
+
+    if cal_method == "global_shift":
+        return GlobalShiftGainPhase(
+            max_shift_ms=cal_params.get("max_shift_ms", 50.0),
+            estimate_phase=cal_params.get("estimate_phase", True),
+            estimate_matching_filter=cal_params.get("estimate_matching_filter", False),
+            matching_filter_taps=cal_params.get("matching_filter_taps", 51),
+        )
+    elif cal_method == "windowed":
+        return WindowedShiftGain(
+            window_ms=cal_params.get("window_ms", 400.0),
+            overlap_ms=cal_params.get("overlap_ms", 100.0),
+            max_shift_ms=cal_params.get("max_shift_ms", 30.0),
+            cc_threshold=cal_params.get("cc_threshold", 0.3),
+        )
+    elif cal_method == "linear_regression":
+        return LinearRegressionCalibrator(
+            regressor_name=cal_params.get("regressor_name", "ridge"),
+            window_samples=cal_params.get("window_samples", 64),
+        )
+    elif cal_method == "gbdt":
+        return GBDTCalibrator(
+            n_estimators=cal_params.get("n_estimators", 200),
+            max_depth=cal_params.get("max_depth", 6),
+            learning_rate=cal_params.get("learning_rate", 0.1),
+            backend=cal_params.get("backend", "sklearn"),
+            window_samples=cal_params.get("window_samples", 64),
+        )
+    else:
+        raise ValueError(f"Unknown calibration method: {cal_method}")
+
+
+def _create_interpolator_with_params():
+    """Create interpolator with UI-selected parameters."""
+    from seis2cube.interpolation.idw import IDWTimeSliceInterpolator
+    from seis2cube.interpolation.pocs import POCSInterpolator
+    from seis2cube.interpolation.mssa import MSSAInterpolator
+
+    interp_method = st.session_state.interp_method
+    interp_params = st.session_state.interp_params
+
+    if interp_method == "idw":
+        return IDWTimeSliceInterpolator(
+            power=interp_params.get("power", 2.0),
+            max_neighbours=interp_params.get("max_neighbours", 12),
+        )
+    elif interp_method == "pocs":
+        return POCSInterpolator(
+            n_iter=interp_params.get("n_iter", 100),
+            fast=interp_params.get("fast", True),
+            threshold_start_pct=interp_params.get("threshold_start_pct", 99.0),
+            threshold_end_pct=interp_params.get("threshold_end_pct", 1.0),
+        )
+    elif interp_method == "mssa":
+        return MSSAInterpolator(
+            rank=interp_params.get("rank", 20),
+            window=interp_params.get("window", 50),
+            n_iter=interp_params.get("n_iter", 30),
+        )
+    else:
+        raise ValueError(f"Unknown interpolation method: {interp_method}")
+
+
+def _run_step_data_loading() -> None:
+    """Step 1: Load 3D cube, 2D lines, build geometry and overlap detection."""
     cfg = st.session_state.config_obj
     if cfg is None:
         st.error("No config loaded")
         return
 
-    st.session_state.pipeline_log = []
-    total_steps = len(STAGE_ORDER)
-    progress_bar = st.sidebar.progress(0.0)
-    status_text = st.sidebar.empty()
+    add_log("Starting Step 1: Data Loading...")
 
     try:
         from seis2cube.io.segy_dataset import SegyDataset
         from seis2cube.geometry.crs_converter import CRSConverter
         from seis2cube.geometry.geometry_model import AffineGridMapper, KDTreeMapper
         from seis2cube.geometry.overlap_detector import OverlapDetector
-        from seis2cube.pipeline.runner import (
-            PipelineRunner,
-            _make_calibrator,
-            _make_interpolator,
-        )
-        from seis2cube.pipeline.volume_builder import VolumeBuilder
-        from seis2cube.io.segy_writer import SegyWriter3D
-        from seis2cube.calibration.base import CalibrationPair
-        from seis2cube.qc.reporter import QCReporter
+        from seis2cube.pipeline.runner import PipelineRunner
 
-        def _progress(idx: int, stage: PipelineStage):
-            p = (idx + 1) / total_steps
-            set_stage(stage, p)
-            progress_bar.progress(p)
-            status_text.markdown(f"**{STAGE_LABELS[stage]}**")
-            add_log(STAGE_LABELS[stage])
-
+        set_stage(PipelineStage.INGESTING, 0.1)
         runner = PipelineRunner(cfg)
 
         # 1. Ingest 3D
-        _progress(0, PipelineStage.INGESTING)
         with SegyDataset(cfg.cube3d_path, cfg.header_bytes, cfg.io) as ds3d:
             meta3d = ds3d.meta
             st.session_state.meta_3d = {
@@ -5658,24 +5574,30 @@ def _run_pipeline() -> None:
         st.session_state.coords_3d = coords_3d
         st.session_state.inlines_3d = inlines_3d
         st.session_state.xlines_3d = xlines_3d
+        add_log(f"Loaded 3D: {meta3d.n_traces} traces, {len(inlines_3d)}×{len(xlines_3d)} IL×XL")
 
         # 2. CRS
-        _progress(1, PipelineStage.CRS_CONVERSION)
+        set_stage(PipelineStage.CRS_CONVERSION, 0.25)
         crs_conv = CRSConverter(cfg.crs)
+        st.session_state.crs_conv = crs_conv
         if not crs_conv.is_identity:
             cx, cy = crs_conv.forward(coords_3d[:, 0], coords_3d[:, 1])
             coords_3d = np.column_stack([cx, cy])
+            st.session_state.coords_3d = coords_3d
+            add_log("CRS conversion applied")
 
         # 3. Geometry
-        _progress(2, PipelineStage.GEOMETRY)
+        set_stage(PipelineStage.GEOMETRY, 0.4)
         if inlines_3d is not None and xlines_3d is not None:
             geom = AffineGridMapper(coords_3d, inlines_3d, xlines_3d)
         else:
             ilxl = np.zeros((len(coords_3d), 2))
             geom = KDTreeMapper(coords_3d, ilxl[:, 0], ilxl[:, 1])
+        st.session_state.geom = geom
+        add_log("Geometry model built")
 
         # 4. Overlap
-        _progress(3, PipelineStage.OVERLAP)
+        set_stage(PipelineStage.OVERLAP, 0.55)
         if cfg.expand_polygon_path is not None:
             expand_poly = OverlapDetector.load_polygon(cfg.expand_polygon_path)
             if not crs_conv.is_identity:
@@ -5688,9 +5610,12 @@ def _run_pipeline() -> None:
                 coords_3d, buffer_pct=cfg.expand_buffer_pct,
             )
         overlap = OverlapDetector.from_3d_coords(coords_3d, expand_polygon=expand_poly)
+        st.session_state.expand_poly = expand_poly
+        st.session_state.overlap = overlap
+        add_log(f"Expansion polygon created, overlap zones detected")
 
         # 5. Load 2D
-        _progress(4, PipelineStage.LOADING_2D)
+        set_stage(PipelineStage.LOADING_2D, 0.8)
         lines_2d = []
         lines_info = []
         for lpath in cfg.lines2d_paths:
@@ -5698,19 +5623,70 @@ def _run_pipeline() -> None:
                                              target_delrt_ms=meta3d.delrt_ms)
             lines_2d.append(line)
             lines_info.append({"name": line.name, "n_traces": line.n_traces, "dt_ms": line.dt_ms})
+        st.session_state.lines_2d = lines_2d
         st.session_state.lines_info = lines_info
         st.session_state.lines_coords = [l.coords for l in lines_2d]
         st.session_state.line_names = [l.name for l in lines_2d]
+        st.session_state.runner = runner  # Store for later steps
+        st.session_state.meta3d = meta3d  # Store for later steps
 
-        # 6. Calibration
-        _progress(5, PipelineStage.CALIBRATION)
+        add_log(f"Loaded {len(lines_2d)} 2D profiles")
+
+        # Complete
+        st.session_state.data_loaded = True
+        st.session_state.work_step = WorkStep.CALIBRATION
+        set_stage(PipelineStage.IDLE, 0.0)
+        add_log("Step 1 complete! Proceeding to Calibration.")
+        st.rerun()
+
+    except Exception as e:
+        set_stage(PipelineStage.ERROR)
+        st.session_state.error_msg = str(e)
+        add_log(f"ERROR in Data Loading: {e}")
+        import traceback
+        traceback.print_exc()
+        st.error(f"Data loading failed: {e}")
+
+
+def _run_step_calibration() -> None:
+    """Step 2: Run calibration with user-selected method and parameters."""
+    if not st.session_state.data_loaded:
+        st.error("Please load data first (Step 1)")
+        return
+
+    add_log("Starting Step 2: Calibration...")
+
+    try:
+        set_stage(PipelineStage.CALIBRATION, 0.3)
+
+        # Get stored data
+        lines_2d = st.session_state.lines_2d
+        overlap = st.session_state.overlap
+        geom = st.session_state.geom
+        meta3d = st.session_state.meta3d
+        cube_volume = st.session_state.cube_volume
+        inlines_3d = st.session_state.inlines_3d
+        xlines_3d = st.session_state.xlines_3d
+        runner = st.session_state.runner
+        test_split_pct = st.session_state.test_split_pct
+
+        # Build calibration pairs with configurable test split
         train_pairs, test_pairs = runner._build_calibration_pairs(
             lines_2d, overlap, geom, meta3d, cube_volume, inlines_3d, xlines_3d,
+            test_ratio=test_split_pct / 100.0,
         )
-        calibrator = _make_calibrator(cfg)
-        cal_model = calibrator.fit(train_pairs)
 
-        # Evaluate
+        add_log(f"Calibration pairs: {len(train_pairs.amp_2d)} train, {len(test_pairs.amp_2d)} test")
+
+        # Create calibrator with UI parameters
+        calibrator = _create_calibrator_with_params(st.session_state.config_obj)
+        cal_model = calibrator.fit(train_pairs)
+        st.session_state.cal_model = cal_model
+        st.session_state.calibrator = calibrator
+
+        add_log(f"Calibration model fitted: {st.session_state.cal_method}")
+
+        # Evaluate on test set
         if test_pairs.amp_2d.shape[0] > 0:
             metrics_after = calibrator.evaluate(test_pairs, cal_model)
             raw = test_pairs.amp_2d
@@ -5723,7 +5699,7 @@ def _run_pipeline() -> None:
             st.session_state.cal_metrics_before = {"corr": float(baseline_corr), "rmse": baseline_rmse}
             st.session_state.cal_metrics_after = metrics_after
 
-            # Store ALL test traces for visualisation
+            # Store test traces
             n_test = len(test_pairs.amp_2d)
             st.session_state.sample_traces_2d = test_pairs.amp_2d
             st.session_state.sample_traces_3d = test_pairs.amp_3d
@@ -5733,7 +5709,7 @@ def _run_pipeline() -> None:
             st.session_state.n_train = len(train_pairs.amp_2d)
             st.session_state.n_test = n_test
 
-            # Per-pair correlation stats (before & after calibration)
+            # Per-pair stats
             per_corr_before = []
             per_corr_after = []
             for i in range(n_test):
@@ -5744,19 +5720,27 @@ def _run_pipeline() -> None:
             st.session_state.per_corr_before = np.array(per_corr_before)
             st.session_state.per_corr_after = np.array(per_corr_after)
 
-        # 7. Apply calibration
-        _progress(6, PipelineStage.APPLYING_CAL)
-        calibrated_lines = [calibrator.apply(line, cal_model) for line in lines_2d]
+            add_log(f"Test metrics - Before: corr={baseline_corr:.3f}, rmse={baseline_rmse:.1f}")
+            add_log(f"Test metrics - After: corr={metrics_after.get('corr', 0):.3f}, rmse={metrics_after.get('rmse', 0):.1f}")
 
-        # 8. Build grid
-        _progress(7, PipelineStage.BUILDING_GRID)
+        # Apply calibration to all lines
+        set_stage(PipelineStage.APPLYING_CAL, 0.7)
+        calibrated_lines = [calibrator.apply(line, cal_model) for line in lines_2d]
+        st.session_state.calibrated_lines = calibrated_lines
+
+        # Build target grid
+        set_stage(PipelineStage.BUILDING_GRID, 0.9)
+        from seis2cube.pipeline.volume_builder import VolumeBuilder
+
         n_il_orig = len(inlines_3d)
         n_xl_orig = len(xlines_3d)
+        coords_3d = st.session_state.coords_3d
         p00 = coords_3d[0]
         p0n = coords_3d[n_xl_orig - 1]
         pn0 = coords_3d[(n_il_orig - 1) * n_xl_orig]
         il_step_xy = (pn0 - p00) / max(n_il_orig - 1, 1)
         xl_step_xy = (p0n - p00) / max(n_xl_orig - 1, 1)
+        expand_poly = st.session_state.expand_poly
 
         vb = VolumeBuilder(
             geometry=geom, orig_inlines=inlines_3d, orig_xlines=xlines_3d,
@@ -5765,73 +5749,124 @@ def _run_pipeline() -> None:
             il_step_x=float(il_step_xy[0]), il_step_y=float(il_step_xy[1]),
             xl_step_x=float(xl_step_xy[0]), xl_step_y=float(xl_step_xy[1]),
         )
-        target_grid = vb.build_target_grid(max_volume_gb=cfg.max_grid_memory_gb)
+        target_grid = vb.build_target_grid(max_volume_gb=st.session_state.config_obj.max_grid_memory_gb)
         st.session_state.target_grid = target_grid
+
+        # Inject data
         sparse = vb.inject_lines(target_grid, calibrated_lines)
         orig_in_grid, orig_mask = vb.inject_original_3d(target_grid, cube_volume, inlines_3d, xlines_3d)
-        del cube_volume; import gc; gc.collect()  # free ~0.15-5.5 GB
+
         st.session_state.orig_mask = orig_mask
         st.session_state.sparse_mask = sparse.mask.copy()
         st.session_state.sparse_fill = float(sparse.fill_ratio)
+        st.session_state.orig_in_grid = orig_in_grid
+        st.session_state.vb = vb
 
-        # 9. Tune interpolation
-        _progress(8, PipelineStage.TUNING_INTERP)
-        interpolator = _make_interpolator(cfg)
-        sim_mask = runner._create_simulation_mask(orig_mask, sparse.mask, inlines_3d, xlines_3d, target_grid)
+        add_log(f"Target grid: {target_grid.n_il}×{target_grid.n_xl} IL×XL")
+
+        # Complete
+        st.session_state.calibration_done = True
+        st.session_state.work_step = WorkStep.INTERPOLATION
+        set_stage(PipelineStage.IDLE, 0.0)
+        add_log("Step 2 complete! Proceeding to Interpolation.")
+        st.rerun()
+
+    except Exception as e:
+        set_stage(PipelineStage.ERROR)
+        st.session_state.error_msg = str(e)
+        add_log(f"ERROR in Calibration: {e}")
+        import traceback
+        traceback.print_exc()
+        st.error(f"Calibration failed: {e}")
+
+
+def _run_step_interpolation() -> None:
+    """Step 3: Run interpolation with user-selected method and parameters."""
+    if not st.session_state.calibration_done:
+        st.error("Please run calibration first (Step 2)")
+        return
+
+    add_log("Starting Step 3: Interpolation...")
+
+    try:
+        # Get stored data
+        orig_in_grid = st.session_state.orig_in_grid
+        orig_mask = st.session_state.orig_mask
+        sparse_mask = st.session_state.sparse_mask
+        target_grid = st.session_state.target_grid
+        vb = st.session_state.vb
+        inlines_3d = st.session_state.inlines_3d
+        xlines_3d = st.session_state.xlines_3d
+        runner = st.session_state.runner
+        cfg = st.session_state.config_obj
+
+        # Create interpolator with UI parameters
+        set_stage(PipelineStage.TUNING_INTERP, 0.3)
+        interpolator = _create_interpolator_with_params()
+
+        # Simulation mask for quality check
+        sim_mask = runner._create_simulation_mask(orig_mask, sparse_mask, inlines_3d, xlines_3d, target_grid)
         sim_metrics = interpolator.fit(orig_in_grid, sim_mask)
         st.session_state.interp_sim_metrics = sim_metrics
-        st.session_state.interp_sim_mask = sim_mask  # Save for scatter plot after reconstruction
+        st.session_state.interp_sim_mask = sim_mask
 
-        # 10. Reconstruct
-        _progress(9, PipelineStage.RECONSTRUCTING)
+        add_log(f"Simulation metrics: RMSE={sim_metrics.get('rmse', 0):.1f}, MAE={sim_metrics.get('mae', 0):.1f}")
+
+        # Reconstruct
+        set_stage(PipelineStage.RECONSTRUCTING, 0.6)
+
+        # Get sparse volume with calibrated lines
+        calibrated_lines = st.session_state.calibrated_lines
+        sparse = vb.inject_lines(target_grid, calibrated_lines)
+
         combined_data = orig_in_grid.copy()
         combined_mask = orig_mask.copy()
         ext_only = sparse.mask & ~orig_mask
         combined_data[ext_only] = np.nan_to_num(sparse.data[ext_only], nan=0.0)
         combined_mask[ext_only] = True
-        del sparse; gc.collect()
 
         from seis2cube.models.volume import SparseVolume as SV
         combined_sparse = SV(grid=target_grid, data=combined_data, mask=combined_mask)
         result = interpolator.reconstruct(combined_sparse)
-        del combined_sparse; gc.collect()
-        st.session_state.recon_volume = result.volume
 
-        # Save scatter plot data: true vs interpolated values from simulation
-        sim_mask = st.session_state.interp_sim_mask
+        st.session_state.recon_volume = result.volume
+        add_log("Interpolation reconstruction complete")
+
+        # Scatter plot data
         if sim_mask is not None and orig_in_grid is not None:
-            sim_positions = np.argwhere(sim_mask & ~orig_mask)  # Interpolated positions in simulation
+            sim_positions = np.argwhere(sim_mask & ~orig_mask)
             if len(sim_positions) > 0:
-                # Sample up to 3000 points for performance
                 n_samples = min(len(sim_positions), 3000)
                 rng = np.random.default_rng(42)
                 sample_idx = rng.choice(len(sim_positions), n_samples, replace=False)
                 sampled_pos = sim_positions[sample_idx]
 
-                # Collect true (from orig_in_grid) and predicted (from result.volume) amplitudes
                 true_vals, pred_vals = [], []
                 for il_idx, xl_idx in sampled_pos:
                     true_trace = orig_in_grid[il_idx, xl_idx, :]
                     pred_trace = result.volume[il_idx, xl_idx, :]
-                    # Use RMS amplitude for scatter plot (one point per trace)
                     true_vals.append(np.sqrt(np.mean(true_trace**2)))
                     pred_vals.append(np.sqrt(np.mean(pred_trace**2)))
 
                 st.session_state.interp_scatter_true = np.array(true_vals)
                 st.session_state.interp_scatter_pred = np.array(pred_vals)
 
-        # 11. Assemble
-        _progress(10, PipelineStage.ASSEMBLING)
+        # Assemble with blending
+        set_stage(PipelineStage.ASSEMBLING, 0.8)
+        blend_taper = st.session_state.get("blend_taper", 10)
         final = VolumeBuilder.assemble(
             orig_vol=orig_in_grid, orig_mask=orig_mask, recon_vol=result.volume,
-            taper_width=cfg.blend.taper_width_traces if cfg.blend.enabled else 0,
-            blend=cfg.blend.enabled,
+            taper_width=blend_taper,
+            blend=True,
         )
         st.session_state.final_volume = final
-        del orig_in_grid, result; gc.collect()
+        add_log(f"Volume assembled with {blend_taper} trace taper")
 
-        # 12. Write
-        _progress(11, PipelineStage.WRITING)
+        # Write output
+        set_stage(PipelineStage.WRITING, 0.9)
+        from seis2cube.io.segy_writer import SegyWriter3D
+
+        meta3d = st.session_state.meta3d
         writer = SegyWriter3D(
             path=cfg.out_cube_path, inlines=target_grid.inlines, xlines=target_grid.xlines,
             dt_us=int(meta3d.dt_ms * 1000), header_bytes=cfg.header_bytes,
@@ -5842,8 +5877,10 @@ def _run_pipeline() -> None:
         )
         out_path = writer.write(final)
 
-        # 13. QC
-        _progress(12, PipelineStage.QC)
+        # QC Report
+        set_stage(PipelineStage.QC, 0.95)
+        from seis2cube.qc.reporter import QCReporter
+
         qc = QCReporter(cfg.qc_report_dir)
         if st.session_state.cal_metrics_before:
             qc.log_calibration(
@@ -5855,19 +5892,20 @@ def _run_pipeline() -> None:
             qc.log_interpolation_sim(sim_metrics)
         qc.save(cfg)
 
-        # Done
+        # Complete
+        st.session_state.interpolation_done = True
+        st.session_state.work_step = WorkStep.DONE
         set_stage(PipelineStage.DONE, 1.0)
-        progress_bar.progress(1.0)
-        status_text.markdown(f"**✅ Complete! → `{out_path}`**")
-        add_log(f"Output: {out_path}")
+        add_log(f"Step 3 complete! Output: {out_path}")
+        st.success(f"✅ Pipeline complete! Output saved to: {out_path}")
 
     except Exception as e:
         set_stage(PipelineStage.ERROR)
         st.session_state.error_msg = str(e)
-        add_log(f"ERROR: {e}")
-        status_text.markdown(f"**❌ {e}**")
+        add_log(f"ERROR in Interpolation: {e}")
         import traceback
         traceback.print_exc()
+        st.error(f"Interpolation failed: {e}")
 
 
 # ── Main content area ──────────────────────────────────────────────────
@@ -7603,7 +7641,7 @@ def section_header(title: str, icon: str = "") -> None:
     )
 
 ===END_FILE===
-===BEGIN_FILE===	seis2cube/ui/state.py	2718
+===BEGIN_FILE===	seis2cube/ui/state.py	3411
 """Session state management for the Streamlit app."""
 
 from __future__ import annotations
@@ -7613,6 +7651,22 @@ from enum import Enum
 from typing import Any
 
 import streamlit as st
+
+
+class WorkStep(int, Enum):
+    """Step-by-step workflow stages."""
+    DATA_LOADING = 1
+    CALIBRATION = 2
+    INTERPOLATION = 3
+    DONE = 4
+
+
+STEP_LABELS = {
+    WorkStep.DATA_LOADING: "📁 Step 1: Data Loading",
+    WorkStep.CALIBRATION: "🔧 Step 2: Calibration",
+    WorkStep.INTERPOLATION: "🧩 Step 3: Interpolation",
+    WorkStep.DONE: "✅ Complete",
+}
 
 
 class PipelineStage(str, Enum):
@@ -7660,6 +7714,7 @@ def init_state() -> None:
     """Initialise session state defaults."""
     defaults = {
         "pipeline_stage": PipelineStage.IDLE,
+        "work_step": WorkStep.DATA_LOADING,
         "pipeline_progress": 0.0,
         "pipeline_log": [],
         "config_dict": None,
@@ -7676,6 +7731,15 @@ def init_state() -> None:
         "target_grid": None,
         "qc_data": None,
         "error_msg": None,
+        # Step-specific settings
+        "cal_method": "global_shift",
+        "cal_params": {},
+        "interp_method": "idw",
+        "interp_params": {},
+        "test_split_pct": 20.0,
+        "data_loaded": False,
+        "calibration_done": False,
+        "interpolation_done": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -9007,7 +9071,7 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 ===END_FILE===
-===BEGIN_FILE===	tests/test_ui_streamlit.py	7565
+===BEGIN_FILE===	tests/test_ui_streamlit.py	8309
 """Streamlit UI tests using the native AppTest framework.
 
 These tests verify that the seis2cube Streamlit UI components render correctly
@@ -9085,29 +9149,47 @@ class TestSidebarElements:
         assert any("3D" in label for label in input_labels), "3D folder input not found"
         assert any("2D" in label for label in input_labels), "2D folder input not found"
 
-    def test_sidebar_has_settings_controls(self, app_test: AppTest) -> None:
-        """Verify sidebar has settings controls (slider, selectboxes)."""
+    def test_sidebar_has_step_navigation(self, app_test: AppTest) -> None:
+        """Verify sidebar has step navigation buttons for step-by-step workflow."""
         app_test.run()
         sidebar = app_test.sidebar
-        
+
+        # Check for step navigation buttons
+        buttons = sidebar.button
+        step_buttons = [b for b in buttons if any(x in str(b.label) for x in ["Data", "Cal", "Interp"])]
+
+        # Should have navigation buttons for steps
+        assert len(step_buttons) >= 3, "Expected step navigation buttons (Data, Cal, Interp)"
+
+    def test_sidebar_has_data_loading_controls(self, app_test: AppTest) -> None:
+        """Verify Step 1 has data loading controls."""
+        app_test.run()
+        sidebar = app_test.sidebar
+
+        # On initial load (Step 1), should have data loading button
+        buttons = sidebar.button
+        load_buttons = [b for b in buttons if "Load" in str(b.label) or "Data" in str(b.label)]
+
+        assert len(load_buttons) > 0, "Data loading controls should exist in Step 1"
+
+    def test_sidebar_has_expansion_slider(self, app_test: AppTest) -> None:
+        """Verify sidebar has expansion buffer slider in Step 1."""
+        app_test.run()
+        sidebar = app_test.sidebar
+
         # Check for expansion buffer slider
         sliders = sidebar.slider
-        assert len(sliders) > 0, "No slider found in sidebar"
-        
-        # Check for selectboxes (calibration and interpolation methods)
-        selectboxes = sidebar.selectbox
-        assert len(selectboxes) >= 2, "Expected at least 2 selectboxes (calibration, interpolation)"
+        assert len(sliders) > 0, "Expansion buffer slider should be in sidebar"
 
-    def test_run_button_exists_in_sidebar(self, app_test: AppTest) -> None:
-        """Verify run button exists in sidebar."""
+    def test_sidebar_has_reset_button(self, app_test: AppTest) -> None:
+        """Verify reset button exists in sidebar."""
         app_test.run()
         sidebar = app_test.sidebar
-        
+
         buttons = sidebar.button
-        run_buttons = [b for b in buttons if "Run" in str(b.label) or "▶" in str(b.label)]
-        
-        # Button should exist
-        assert len(run_buttons) > 0, "Run button should exist in sidebar"
+        reset_buttons = [b for b in buttons if "Reset" in str(b.label)]
+
+        assert len(reset_buttons) > 0, "Reset button should exist in sidebar"
 
 
 class TestDashboardTab:

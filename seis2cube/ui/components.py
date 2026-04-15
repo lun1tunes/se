@@ -376,15 +376,14 @@ def plot_map_with_lines(
             hovertemplate="Original 3D<br>X: %{x:.1f}<br>Y: %{y:.1f}<extra></extra>",
         ))
 
-    # 2D lines with enhanced styling
+    # 2D lines - lines only for performance (no markers)
     for i, (lc, ln) in enumerate(zip(lines_coords, line_names)):
         color = colours[i % len(colours)]
         all_x.extend(lc[:, 0].tolist())
         all_y.extend(lc[:, 1].tolist())
         fig.add_trace(go.Scatter(
             x=lc[:, 0], y=lc[:, 1],
-            mode="lines+markers",
-            marker=dict(size=5, color=color, symbol="circle", line=dict(width=1, color="white")),
+            mode="lines",
             line=dict(color=color, width=2.5),
             name=f"📏 {ln}",
             hovertemplate=f"<b>{ln}</b><br>X: %{{x:.1f}}<br>Y: %{{y:.1f}}<extra></extra>",
