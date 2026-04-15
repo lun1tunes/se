@@ -5127,7 +5127,7 @@ class QCReporter:
 """Streamlit UI for seis2cube."""
 
 ===END_FILE===
-===BEGIN_FILE===	seis2cube/ui/app.py	87549
+===BEGIN_FILE===	seis2cube/ui/app.py	89095
 """
 seis2cube — Streamlit Dashboard
 
@@ -6745,6 +6745,20 @@ with tab_viewer:
 
         _delrt = st.session_state.meta_3d.get("delrt_ms", 0.0) if st.session_state.meta_3d else 0.0
 
+        # Prepare polygon overlays for time slice maps (convert XY to IL/XL)
+        lines_ilxl = None
+        try:
+            geom = st.session_state.geom
+            lines_coords = getattr(st.session_state, "lines_coords", [])
+            if geom is not None and lines_coords:
+                lines_ilxl = []
+                for lc in lines_coords:
+                    if len(lc) > 0:
+                        il_frac, xl_frac = geom.xy_to_ilxl(lc[:, 0], lc[:, 1])
+                        lines_ilxl.append(np.column_stack([il_frac, xl_frac]))
+        except Exception:
+            lines_ilxl = None
+
         if view_mode == "Time Slice (IL × XL)":
             max_samp = vol.shape[2] - 1
             t_idx = st.slider(
@@ -6765,6 +6779,11 @@ with tab_viewer:
                         xlines=st.session_state.xlines_3d,
                         title=f"Original 3D — t={t_ms:.1f} ms",
                         height=450,
+                        orig_inlines=st.session_state.inlines_3d,
+                        orig_xlines=st.session_state.xlines_3d,
+                        extended_inlines=grid.inlines if grid else None,
+                        extended_xlines=grid.xlines if grid else None,
+                        lines_ilxl=lines_ilxl,
                     )
                     st.plotly_chart(fig_o, width='stretch')
                 with c2:
@@ -6774,6 +6793,11 @@ with tab_viewer:
                         xlines=grid.xlines if grid else None,
                         title=f"Extended Cube — t={t_ms:.1f} ms",
                         height=450,
+                        orig_inlines=st.session_state.inlines_3d,
+                        orig_xlines=st.session_state.xlines_3d,
+                        extended_inlines=grid.inlines if grid else None,
+                        extended_xlines=grid.xlines if grid else None,
+                        lines_ilxl=lines_ilxl,
                     )
                     st.plotly_chart(fig_f, width='stretch')
             else:
@@ -6785,6 +6809,11 @@ with tab_viewer:
                     xlines=grid.xlines if grid else None,
                     title=f"{label} — Time Slice at t={t_ms:.1f} ms",
                     height=500,
+                    orig_inlines=st.session_state.inlines_3d,
+                    orig_xlines=st.session_state.xlines_3d,
+                    extended_inlines=grid.inlines if grid else None,
+                    extended_xlines=grid.xlines if grid else None,
+                    lines_ilxl=lines_ilxl,
                 )
                 st.plotly_chart(fig, width='stretch')
 
@@ -7119,7 +7148,7 @@ with tab_qc:
                 )
 
 ===END_FILE===
-===BEGIN_FILE===	seis2cube/ui/components.py	18538
+===BEGIN_FILE===	seis2cube/ui/components.py	20893
 """Reusable UI components for the Streamlit app."""
 
 from __future__ import annotations
@@ -7232,8 +7261,25 @@ def plot_time_slice(
     xlines: np.ndarray | None = None,
     title: str = "Time Slice",
     height: int = 500,
+    orig_inlines: np.ndarray | None = None,
+    orig_xlines: np.ndarray | None = None,
+    extended_inlines: np.ndarray | None = None,
+    extended_xlines: np.ndarray | None = None,
+    lines_ilxl: list[np.ndarray] | None = None,
 ) -> go.Figure:
-    """Plot a single time-slice as a heatmap."""
+    """Plot a single time-slice as a heatmap with optional polygon overlays.
+
+    Parameters
+    ----------
+    data : 3D array (n_il, n_xl, n_samples) or 2D slice
+    sample_idx : time sample index to display
+    inlines, xlines : coordinate arrays for the displayed volume
+    title : plot title
+    height : plot height in pixels
+    orig_inlines, orig_xlines : original 3D cube boundary (for polygon overlay)
+    extended_inlines, extended_xlines : extended grid boundary (for polygon overlay)
+    lines_ilxl : list of (N, 2) arrays with IL/XL coords for each 2D line
+    """
     if data.ndim == 3:
         slice_data = data[:, :, sample_idx]
     else:
@@ -7252,6 +7298,48 @@ def plot_time_slice(
         zmax=vmax,
         colorbar=dict(title="Amplitude", tickfont=dict(color=PALETTE["text"])),
     ))
+
+    # Add extended grid boundary (dashed gray)
+    if extended_inlines is not None and extended_xlines is not None:
+        il_min, il_max = extended_inlines[0], extended_inlines[-1]
+        xl_min, xl_max = extended_xlines[0], extended_xlines[-1]
+        fig.add_trace(go.Scatter(
+            x=[xl_min, xl_max, xl_max, xl_min, xl_min],
+            y=[il_min, il_min, il_max, il_max, il_min],
+            mode="lines",
+            line=dict(color="#888888", width=2, dash="dash"),
+            name="Extended Grid",
+            hoverinfo="skip",
+        ))
+
+    # Add original 3D cube boundary (solid blue)
+    if orig_inlines is not None and orig_xlines is not None:
+        il_min, il_max = orig_inlines[0], orig_inlines[-1]
+        xl_min, xl_max = orig_xlines[0], orig_xlines[-1]
+        fig.add_trace(go.Scatter(
+            x=[xl_min, xl_max, xl_max, xl_min, xl_min],
+            y=[il_min, il_min, il_max, il_max, il_min],
+            mode="lines",
+            line=dict(color=PALETTE["primary"], width=3),
+            name="Original 3D",
+            hoverinfo="skip",
+        ))
+
+    # Add 2D profile lines
+    if lines_ilxl is not None:
+        colors = px.colors.qualitative.Vivid
+        for i, line_coords in enumerate(lines_ilxl):
+            if len(line_coords) > 0:
+                color = colors[i % len(colors)]
+                fig.add_trace(go.Scatter(
+                    x=line_coords[:, 1],  # XL
+                    y=line_coords[:, 0],  # IL
+                    mode="lines",
+                    line=dict(color=color, width=2),
+                    name=f"2D Line {i+1}",
+                    hoverinfo="skip",
+                ))
+
     fig.update_layout(
         title=dict(text=title, font=dict(color=PALETTE["text"])),
         xaxis_title="Crossline",
@@ -7262,6 +7350,7 @@ def plot_time_slice(
         font=dict(color=PALETTE["text"]),
         yaxis=dict(autorange="reversed", scaleanchor="x"),
         xaxis=dict(constrain="domain"),
+        showlegend=False,
     )
     return fig
 
@@ -7498,15 +7587,14 @@ def plot_map_with_lines(
             hovertemplate="Original 3D<br>X: %{x:.1f}<br>Y: %{y:.1f}<extra></extra>",
         ))
 
-    # 2D lines with enhanced styling
+    # 2D lines - lines only for performance (no markers)
     for i, (lc, ln) in enumerate(zip(lines_coords, line_names)):
         color = colours[i % len(colours)]
         all_x.extend(lc[:, 0].tolist())
         all_y.extend(lc[:, 1].tolist())
         fig.add_trace(go.Scatter(
             x=lc[:, 0], y=lc[:, 1],
-            mode="lines+markers",
-            marker=dict(size=5, color=color, symbol="circle", line=dict(width=1, color="white")),
+            mode="lines",
             line=dict(color=color, width=2.5),
             name=f"📏 {ln}",
             hovertemplate=f"<b>{ln}</b><br>X: %{{x:.1f}}<br>Y: %{{y:.1f}}<extra></extra>",

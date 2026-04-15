@@ -1615,6 +1615,20 @@ with tab_viewer:
 
         _delrt = st.session_state.meta_3d.get("delrt_ms", 0.0) if st.session_state.meta_3d else 0.0
 
+        # Prepare polygon overlays for time slice maps (convert XY to IL/XL)
+        lines_ilxl = None
+        try:
+            geom = st.session_state.geom
+            lines_coords = getattr(st.session_state, "lines_coords", [])
+            if geom is not None and lines_coords:
+                lines_ilxl = []
+                for lc in lines_coords:
+                    if len(lc) > 0:
+                        il_frac, xl_frac = geom.xy_to_ilxl(lc[:, 0], lc[:, 1])
+                        lines_ilxl.append(np.column_stack([il_frac, xl_frac]))
+        except Exception:
+            lines_ilxl = None
+
         if view_mode == "Time Slice (IL × XL)":
             max_samp = vol.shape[2] - 1
             t_idx = st.slider(
@@ -1635,6 +1649,11 @@ with tab_viewer:
                         xlines=st.session_state.xlines_3d,
                         title=f"Original 3D — t={t_ms:.1f} ms",
                         height=450,
+                        orig_inlines=st.session_state.inlines_3d,
+                        orig_xlines=st.session_state.xlines_3d,
+                        extended_inlines=grid.inlines if grid else None,
+                        extended_xlines=grid.xlines if grid else None,
+                        lines_ilxl=lines_ilxl,
                     )
                     st.plotly_chart(fig_o, width='stretch')
                 with c2:
@@ -1644,6 +1663,11 @@ with tab_viewer:
                         xlines=grid.xlines if grid else None,
                         title=f"Extended Cube — t={t_ms:.1f} ms",
                         height=450,
+                        orig_inlines=st.session_state.inlines_3d,
+                        orig_xlines=st.session_state.xlines_3d,
+                        extended_inlines=grid.inlines if grid else None,
+                        extended_xlines=grid.xlines if grid else None,
+                        lines_ilxl=lines_ilxl,
                     )
                     st.plotly_chart(fig_f, width='stretch')
             else:
@@ -1655,6 +1679,11 @@ with tab_viewer:
                     xlines=grid.xlines if grid else None,
                     title=f"{label} — Time Slice at t={t_ms:.1f} ms",
                     height=500,
+                    orig_inlines=st.session_state.inlines_3d,
+                    orig_xlines=st.session_state.xlines_3d,
+                    extended_inlines=grid.inlines if grid else None,
+                    extended_xlines=grid.xlines if grid else None,
+                    lines_ilxl=lines_ilxl,
                 )
                 st.plotly_chart(fig, width='stretch')
 

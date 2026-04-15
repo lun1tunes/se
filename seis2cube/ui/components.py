@@ -110,8 +110,25 @@ def plot_time_slice(
     xlines: np.ndarray | None = None,
     title: str = "Time Slice",
     height: int = 500,
+    orig_inlines: np.ndarray | None = None,
+    orig_xlines: np.ndarray | None = None,
+    extended_inlines: np.ndarray | None = None,
+    extended_xlines: np.ndarray | None = None,
+    lines_ilxl: list[np.ndarray] | None = None,
 ) -> go.Figure:
-    """Plot a single time-slice as a heatmap."""
+    """Plot a single time-slice as a heatmap with optional polygon overlays.
+
+    Parameters
+    ----------
+    data : 3D array (n_il, n_xl, n_samples) or 2D slice
+    sample_idx : time sample index to display
+    inlines, xlines : coordinate arrays for the displayed volume
+    title : plot title
+    height : plot height in pixels
+    orig_inlines, orig_xlines : original 3D cube boundary (for polygon overlay)
+    extended_inlines, extended_xlines : extended grid boundary (for polygon overlay)
+    lines_ilxl : list of (N, 2) arrays with IL/XL coords for each 2D line
+    """
     if data.ndim == 3:
         slice_data = data[:, :, sample_idx]
     else:
@@ -130,6 +147,48 @@ def plot_time_slice(
         zmax=vmax,
         colorbar=dict(title="Amplitude", tickfont=dict(color=PALETTE["text"])),
     ))
+
+    # Add extended grid boundary (dashed gray)
+    if extended_inlines is not None and extended_xlines is not None:
+        il_min, il_max = extended_inlines[0], extended_inlines[-1]
+        xl_min, xl_max = extended_xlines[0], extended_xlines[-1]
+        fig.add_trace(go.Scatter(
+            x=[xl_min, xl_max, xl_max, xl_min, xl_min],
+            y=[il_min, il_min, il_max, il_max, il_min],
+            mode="lines",
+            line=dict(color="#888888", width=2, dash="dash"),
+            name="Extended Grid",
+            hoverinfo="skip",
+        ))
+
+    # Add original 3D cube boundary (solid blue)
+    if orig_inlines is not None and orig_xlines is not None:
+        il_min, il_max = orig_inlines[0], orig_inlines[-1]
+        xl_min, xl_max = orig_xlines[0], orig_xlines[-1]
+        fig.add_trace(go.Scatter(
+            x=[xl_min, xl_max, xl_max, xl_min, xl_min],
+            y=[il_min, il_min, il_max, il_max, il_min],
+            mode="lines",
+            line=dict(color=PALETTE["primary"], width=3),
+            name="Original 3D",
+            hoverinfo="skip",
+        ))
+
+    # Add 2D profile lines
+    if lines_ilxl is not None:
+        colors = px.colors.qualitative.Vivid
+        for i, line_coords in enumerate(lines_ilxl):
+            if len(line_coords) > 0:
+                color = colors[i % len(colors)]
+                fig.add_trace(go.Scatter(
+                    x=line_coords[:, 1],  # XL
+                    y=line_coords[:, 0],  # IL
+                    mode="lines",
+                    line=dict(color=color, width=2),
+                    name=f"2D Line {i+1}",
+                    hoverinfo="skip",
+                ))
+
     fig.update_layout(
         title=dict(text=title, font=dict(color=PALETTE["text"])),
         xaxis_title="Crossline",
@@ -140,6 +199,7 @@ def plot_time_slice(
         font=dict(color=PALETTE["text"]),
         yaxis=dict(autorange="reversed", scaleanchor="x"),
         xaxis=dict(constrain="domain"),
+        showlegend=False,
     )
     return fig
 
